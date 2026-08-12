@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: https://www.gstatic.com https://apis.google.com; worker-src 'self' blob: https://www.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https:; media-src 'self' data: blob: https:; connect-src 'self' https: wss: blob:; frame-src 'self' https:;" />
+    <meta name="theme-color" content="#050505" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="TalkTablee" />
+    <meta name="format-detection" content="telephone=no" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="apple-touch-icon" href="/logo.svg" />
+    <link rel="icon" type="image/svg+xml" href="/logo.svg" />
+    <link rel="preload" href="/logo.svg" as="image" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;800&family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet">
+    <title>TalkTablee | Salein Cafe - النادل الذكي</title>
+  </head>
+  <body>
+    <div id="root">
+      <style>
+        .initial-loader-wrapper {
+          min-height: 100vh;
+          min-height: 100dvh;
+          background-color: #050505;
+          color: #F5F5F7;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          font-family: 'Cairo', system-ui, -apple-system, sans-serif;
+          padding: 1.5rem;
+          text-align: center;
+          position: relative;
+          overflow: hidden;
+        }
+        .initial-glow {
+          position: absolute;
+          width: 320px;
+          height: 320px;
+          background: rgba(201, 160, 80, 0.12);
+          border-radius: 50%;
+          filter: blur(100px);
+          pointer-events: none;
+        }
+        .initial-card {
+          position: relative;
+          z-index: 10;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 1.25rem;
+          max-width: 320px;
+          width: 100%;
+        }
+        .initial-logo-box {
+          width: 72px;
+          height: 72px;
+          background: rgba(201, 160, 80, 0.15);
+          border: 1px solid rgba(201, 160, 80, 0.35);
+          border-radius: 22px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          box-shadow: 0 10px 30px -5px rgba(201, 160, 80, 0.25);
+        }
+        .initial-logo-img {
+          width: 44px;
+          height: 44px;
+          object-fit: contain;
+        }
+        .initial-title {
+          font-size: 1.65rem;
+          font-weight: 800;
+          color: #ffffff;
+          margin: 0;
+          letter-spacing: -0.01em;
+        }
+        .initial-subtitle {
+          font-size: 0.8rem;
+          color: #C9A050;
+          font-weight: 600;
+          letter-spacing: 0.1em;
+          margin: 0.25rem 0 0 0;
+        }
+        .initial-progress-track {
+          width: 180px;
+          height: 4px;
+          background: rgba(255, 255, 255, 0.1);
+          border-radius: 999px;
+          overflow: hidden;
+          position: relative;
+          margin-top: 0.5rem;
+        }
+        .initial-progress-bar {
+          position: absolute;
+          left: 0;
+          top: 0;
+          height: 100%;
+          width: 35%;
+          background: linear-gradient(90deg, #C9A050, #E5C170);
+          border-radius: 999px;
+          animation: initial-progress 1.5s ease-in-out infinite;
+        }
+        @keyframes initial-progress {
+          0% { left: -35%; width: 35%; }
+          50% { left: 35%; width: 50%; }
+          100% { left: 100%; width: 35%; }
+        }
+        .initial-retry-btn {
+          display: none;
+          margin-top: 1rem;
+          padding: 0.65rem 1.25rem;
+          background: #C9A050;
+          color: #000;
+          font-weight: 700;
+          border: none;
+          border-radius: 12px;
+          cursor: pointer;
+          font-size: 0.9rem;
+          box-shadow: 0 4px 15px rgba(201, 160, 80, 0.3);
+        }
+      </style>
+      <div class="initial-loader-wrapper" id="initial-shell">
+        <div class="initial-glow"></div>
+        <div class="initial-card">
+          <div class="initial-logo-box">
+            <img src="/logo.svg" alt="Salein Cafe Logo" class="initial-logo-img" />
+          </div>
+          <div>
+            <h1 class="initial-title">Salein Cafe</h1>
+            <p class="initial-subtitle">Ward AI Voice Waiter • ورد</p>
+          </div>
+          <div class="initial-progress-track">
+            <div class="initial-progress-bar"></div>
+          </div>
+          <button id="initial-retry-btn" class="initial-retry-btn" onclick="window.location.reload()">
+            إعادة المحاولة • Retry
+          </button>
+        </div>
+      </div>
+      <script>
+        // Fallback safety timeout if app fails to mount in 12 seconds
+        window.__appMountTimeout = setTimeout(function() {
+          var btn = document.getElementById('initial-retry-btn');
+          if (btn) btn.style.display = 'block';
+        }, 12000);
+      </script>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

@@ -1,0 +1,75 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Settings (e.g. restaurant status)
+    match /settings/{docId} {
+      allow read, write: if true;
+    }
+
+    // Menu Items & Categories
+    match /menuItems/{itemId} {
+      allow read, write: if true;
+    }
+
+    match /categories/{categoryId} {
+      allow read, write: if true;
+    }
+
+    // Tables & Table Sessions
+    match /tables/{tableId} {
+      allow read, write: if true;
+    }
+
+    match /tableSessions/{sessionId} {
+      allow read, write: if true;
+    }
+
+    // Shifts (Source of truth for restaurant availability)
+    match /shifts/{shiftId} {
+      allow read, write: if true;
+    }
+
+    // Orders
+    match /orders/{orderId} {
+      allow read, write: if true;
+    }
+
+    // Waiter Requests
+    match /waiterRequests/{requestId} {
+      allow read, write: if true;
+    }
+
+    // Reviews & Favorites
+    match /reviews/{reviewId} {
+      allow read, write: if true;
+    }
+
+    match /favorites/{favoriteId} {
+      allow read, write: if true;
+    }
+
+    // Users
+    match /users/{userId} {
+      allow read, write: if true;
+    }
+
+    // Audit Logs
+    match /auditLogs/{logId} {
+      allow read, write: if true;
+    }
+
+    // FCM & Staff Devices
+    match /fcmTokens/{tokenId} {
+      allow read, write: if true;
+    }
+
+    match /staff_devices/{deviceId} {
+      allow read, write: if true;
+    }
+
+    match /staffNotifications/{notificationId} {
+      allow read, write: if true;
+    }
+  }
+}

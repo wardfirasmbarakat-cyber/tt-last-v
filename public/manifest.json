@@ -1,0 +1,20 @@
+{
+  "name": "TalkTablee - Cafe & Restaurant Voice Waiter",
+  "short_name": "TalkTablee",
+  "description": "Production AI Voice Waiter, Table Orders & Staff Dashboard System",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#050505",
+  "theme_color": "#050505",
+  "orientation": "any",
+  "scope": "/",
+  "gcm_sender_id": "186751380976",
+  "icons": [
+    {
+      "src": "/logo.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

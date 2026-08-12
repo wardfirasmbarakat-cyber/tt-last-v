@@ -1,0 +1,463 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "A customer or staff user profile",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Unique identifier matching request.auth.uid"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "User display name"
+        },
+        "email": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "User email address"
+        },
+        "role": {
+          "type": "string",
+          "enum": ["customer", "staff"],
+          "description": "Security access level"
+        },
+        "loyaltyPoints": {
+          "type": "integer",
+          "description": "Current active loyalty points"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp of profile creation"
+        }
+      },
+      "required": ["userId", "name", "email", "role", "loyaltyPoints", "createdAt"]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "A food and beverage order placed from a table",
+      "type": "object",
+      "properties": {
+        "orderId": {
+          "type": "string",
+          "description": "Unique order ID"
+        },
+        "userId": {
+          "type": "string",
+          "description": "ID of the customer who placed the order"
+        },
+        "tableNumber": {
+          "type": "string",
+          "maxLength": 10,
+          "description": "Table identifier"
+        },
+        "items": {
+          "type": "array",
+          "description": "List of ordered items with customizations"
+        },
+        "subtotal": {
+          "type": "number",
+          "description": "Subtotal amount in local currency"
+        },
+        "tax": {
+          "type": "number",
+          "description": "Tax calculated on items"
+        },
+        "serviceFee": {
+          "type": "number",
+          "description": "Service charge added"
+        },
+        "discount": {
+          "type": "number",
+          "description": "Discount amount"
+        },
+        "talkTableFee": {
+          "type": "number",
+          "description": "TalkTableee fixed platform fee"
+        },
+        "total": {
+          "type": "number",
+          "description": "Grand total charged"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["New", "new", "pending", "preparing", "ready", "delivered", "finished", "cancelled"],
+          "description": "Current preparation/delivery status"
+        },
+        "orderStatus": {
+          "type": "string",
+          "enum": ["New", "new", "pending", "preparing", "ready", "delivered", "finished", "cancelled"],
+          "description": "Status of order preparation"
+        },
+        "paymentStatus": {
+          "type": "string",
+          "enum": ["unpaid", "paid", "pending"],
+          "description": "Order payment status"
+        },
+        "paymentMethod": {
+          "type": "string",
+          "enum": ["card", "cash"],
+          "description": "Payment method used"
+        },
+        "pointsEarned": {
+          "type": "integer",
+          "description": "Points earned from this order"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when order was placed"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp of last modification"
+        }
+      },
+      "required": ["orderId", "userId", "tableNumber", "items", "subtotal", "tax", "serviceFee", "discount", "talkTableFee", "total", "status", "orderStatus", "paymentStatus", "paymentMethod", "pointsEarned", "createdAt", "updatedAt"]
+    },
+    "WaiterRequest": {
+      "title": "WaiterRequest",
+      "description": "A service request sent from a table to staff",
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "description": "Unique request ID"
+        },
+        "tableNumber": {
+          "type": "string",
+          "maxLength": 10,
+          "description": "Table identifier"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Customer user ID if authenticated"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["call_waiter", "request_water", "request_napkins", "request_cutlery", "clean_table", "request_bill"],
+          "description": "The specific item or action requested"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "completed"],
+          "description": "Status of the staff completion"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp of request"
+        }
+      },
+      "required": ["requestId", "tableNumber", "type", "status", "createdAt"]
+    },
+    "Review": {
+      "title": "Review",
+      "description": "Customer feedback left after ordering",
+      "type": "object",
+      "properties": {
+        "reviewId": {
+          "type": "string",
+          "description": "Unique review ID"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Customer user ID"
+        },
+        "userName": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "Name of the reviewer"
+        },
+        "foodRating": {
+          "type": "integer",
+          "description": "Food rating from 1 to 5"
+        },
+        "serviceRating": {
+          "type": "integer",
+          "description": "Service rating from 1 to 5"
+        },
+        "atmosphereRating": {
+          "type": "integer",
+          "description": "Atmosphere rating from 1 to 5"
+        },
+        "comments": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "Review comments"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when review was created"
+        }
+      },
+      "required": ["reviewId", "userId", "userName", "foodRating", "serviceRating", "atmosphereRating", "createdAt"]
+    },
+    "Favorite": {
+      "title": "Favorite",
+      "description": "A favorited menu item for a customer",
+      "type": "object",
+      "properties": {
+        "favoriteId": {
+          "type": "string",
+          "description": "Unique favorite record ID (userId_itemId)"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Customer user ID"
+        },
+        "itemId": {
+          "type": "string",
+          "maxLength": 50,
+          "description": "The menu item ID"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp of favoriting"
+        }
+      },
+      "required": ["favoriteId", "userId", "itemId", "createdAt"]
+    },
+    "TableStatus": {
+      "title": "TableStatus",
+      "description": "The occupancy state of a physical table",
+      "type": "object",
+      "properties": {
+        "tableId": {
+          "type": "string",
+          "description": "Table identifier"
+        },
+        "isOccupied": {
+          "type": "boolean",
+          "description": "Whether the table is currently occupied"
+        },
+        "userId": {
+          "type": "string",
+          "description": "The occupant user ID"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when table was reserved"
+        }
+      },
+      "required": ["tableId", "isOccupied", "userId", "updatedAt"]
+    },
+    "TableSession": {
+      "title": "TableSession",
+      "description": "Active session memory and live cart for a table",
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string" },
+        "tableId": { "type": "string" },
+        "restaurantId": { "type": "string" },
+        "status": { "type": "string", "enum": ["ACTIVE", "FINISHED"] },
+        "messages": { "type": "array" },
+        "cart": { "type": "array" },
+        "orderNotes": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["sessionId", "tableId", "status"]
+    },
+    "RestaurantSettings": {
+      "title": "RestaurantSettings",
+      "description": "The onboarding and operational settings of the restaurant",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "logo": { "type": "string" },
+        "coverImage": { "type": "string" },
+        "address": { "type": "string" },
+        "phone": { "type": "string" },
+        "businessHours": { "type": "string" },
+        "cuisineType": { "type": "string" },
+        "currency": { "type": "string" },
+        "language": { "type": "string" },
+        "taxRate": { "type": "number" },
+        "serviceFee": { "type": "number" },
+        "isServiceFeeEnabled": { "type": "boolean" },
+        "acceptedPaymentMethods": { "type": "array" },
+        "facebook": { "type": "string" },
+        "instagram": { "type": "string" },
+        "status": { "type": "string" },
+        "activeShiftId": { "type": "string" },
+        "currentShiftTalkTableFee": { "type": "number" },
+        "totalTalkTableFees": { "type": "number" }
+      },
+      "required": ["name", "description", "logo", "coverImage", "address", "phone", "businessHours", "cuisineType", "currency", "language", "taxRate", "serviceFee", "isServiceFeeEnabled", "acceptedPaymentMethods"]
+    },
+    "Shift": {
+      "title": "Shift",
+      "description": "A recorded work shift session tracking transactions and sales",
+      "type": "object",
+      "properties": {
+        "shiftId": { "type": "string" },
+        "restaurantId": { "type": "string" },
+        "openedBy": { "type": "string" },
+        "closedBy": { "type": "string" },
+        "startTime": { "type": "string", "format": "date-time" },
+        "endTime": { "type": "string", "format": "date-time" },
+        "totalOrders": { "type": "integer" },
+        "completedOrders": { "type": "integer" },
+        "cancelledOrders": { "type": "integer" },
+        "cashOrders": { "type": "integer" },
+        "cardOrders": { "type": "integer" },
+        "totalSales": { "type": "number" },
+        "totalTalkTableeeFees": { "type": "number" },
+        "averageOrderValue": { "type": "number" },
+        "status": { "type": "string", "enum": ["open", "closed"] },
+        "shiftStart": { "type": "string", "format": "date-time" },
+        "shiftEnd": { "type": "string", "format": "date-time" },
+        "ordersCompleted": { "type": "integer" },
+        "talkTableFeesCollected": { "type": "number" }
+      },
+      "required": ["shiftId", "restaurantId", "openedBy", "startTime", "totalOrders", "completedOrders", "cancelledOrders", "cashOrders", "cardOrders", "totalSales", "totalTalkTableeeFees", "averageOrderValue", "status"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Permanently stored tamper-proof log of secure events",
+      "type": "object",
+      "properties": {
+        "action": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "authorizedAdmin": { "type": "string" },
+        "restaurantId": { "type": "string" },
+        "previousLifetimeTotal": { "type": "number" },
+        "newLifetimeTotal": { "type": "number" },
+        "details": { "type": "string" },
+        "tableNumber": { "type": "string" },
+        "sessionId": { "type": "string" },
+        "activeOrdersCount": { "type": "integer" }
+      },
+      "required": ["action", "timestamp", "authorizedAdmin", "restaurantId", "details"]
+    },
+    "MenuItem": {
+      "title": "MenuItem",
+      "description": "Dynamic restaurant menu item record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "price": { "type": "number" },
+        "description": { "type": "string" }
+      },
+      "required": ["id", "name", "category", "price"]
+    },
+    "Category": {
+      "title": "Category",
+      "description": "Menu category record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" }
+      },
+      "required": ["id", "name"]
+    },
+    "FcmToken": {
+      "title": "FcmToken",
+      "description": "Push notification token registration",
+      "type": "object",
+      "properties": {
+        "token": { "type": "string", "maxLength": 512 },
+        "role": { "type": "string", "maxLength": 50 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["token"]
+    },
+    "StaffDevice": {
+      "title": "StaffDevice",
+      "description": "Staff device registration for push alerts",
+      "type": "object",
+      "properties": {
+        "token": { "type": "string", "maxLength": 512 },
+        "role": { "type": "string", "maxLength": 50 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["token"]
+    },
+    "StaffNotification": {
+      "title": "StaffNotification",
+      "description": "Staff push notification dispatch log",
+      "type": "object",
+      "properties": {
+        "notificationId": { "type": "string", "maxLength": 128 },
+        "type": { "type": "string", "maxLength": 50 },
+        "title": { "type": "string", "maxLength": 200 },
+        "body": { "type": "string", "maxLength": 1000 },
+        "tableNumber": { "type": "string", "maxLength": 10 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["notificationId", "type", "title", "body", "tableNumber", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Users collection containing personal settings and profiles"
+    },
+    "/orders/{orderId}": {
+      "schema": "Order",
+      "description": "Orders collection tracking table food orders"
+    },
+    "/waiterRequests/{requestId}": {
+      "schema": "WaiterRequest",
+      "description": "Service requests sent by tables"
+    },
+    "/reviews/{reviewId}": {
+      "schema": "Review",
+      "description": "Restaurant reviews posted by customers"
+    },
+    "/favorites/{favoriteId}": {
+      "schema": "Favorite",
+      "description": "Saved favorite meals for customers"
+    },
+    "/tables/{tableId}": {
+      "schema": "TableStatus",
+      "description": "Table reservation and occupancy locks"
+    },
+    "/tableSessions/{tableId}": {
+      "schema": "TableSession",
+      "description": "Active session state and live cart per table"
+    },
+    "/settings/{docId}": {
+      "schema": "RestaurantSettings",
+      "description": "Onboarding and dynamic configuration settings"
+    },
+    "/menuItems/{itemId}": {
+      "schema": "MenuItem",
+      "description": "Dynamic menu item collection"
+    },
+    "/categories/{categoryId}": {
+      "schema": "Category",
+      "description": "Menu category collection"
+    },
+    "/shifts/{shiftId}": {
+      "schema": "Shift",
+      "description": "Operational shift statistics and tracking history"
+    },
+    "/auditLogs/{logId}": {
+      "schema": "AuditLog",
+      "description": "Secure log records of system resets"
+    },
+    "/fcmTokens/{tokenId}": {
+      "schema": "FcmToken",
+      "description": "Push notification device tokens"
+    },
+    "/staff_devices/{deviceId}": {
+      "schema": "StaffDevice",
+      "description": "Registered staff device tokens"
+    },
+    "/staffNotifications/{notificationId}": {
+      "schema": "StaffNotification",
+      "description": "Historical queue of notifications dispatched to staff"
+    }
+  }
+}

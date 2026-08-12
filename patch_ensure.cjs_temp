@@ -1,0 +1,2665 @@
+import React, { useState, useEffect, useRef } from "react";
+import { motion, AnimatePresence } from "motion/react";
+import { Send, Bot, User, Volume2, Sparkles, AlertCircle, Mic, MicOff, VolumeX, HelpCircle, Phone, PhoneOff, Languages, FileText, Check, RotateCcw, Utensils, ChefHat, Loader2 } from "lucide-react";
+import AiOrb, { OrbState } from "./AiOrb";
+import { MENU_ITEMS } from "../data/menu";
+import { Order, CartItem } from "../types";
+import { db, auth, handleFirestoreError, OperationType } from "../lib/firebase";
+import { doc, setDoc } from "firebase/firestore";
+
+interface Message {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  isAudioPlaying?: boolean;
+}
+
+interface AiWaiterChatProps {
+  tableNumber: string;
+  cart?: CartItem[];
+  onAddToCart?: (item: any) => void;
+  onNavigate?: (tab: string) => void;
+  onOrderPlaced?: (order: Order) => void;
+  onClearCart?: () => void;
+  initialQuery?: string;
+  onClearInitialQuery?: () => void;
+}
+
+const SUGGESTED_PROMPTS_EN = [
+  "I want something sweet.",
+  "I'm allergic to peanuts. What to avoid?",
+  "Recommend a lunch under 10 JD.",
+  "What's your best coffee & dessert combo?",
+  "What vegan options do you have?",
+  "Can I customize my burger?"
+];
+
+const SUGGESTED_PROMPTS_AR = [
+  "شو بتنصحني آكل؟",
+  "بدي إشي حلو وسعره مناسب",
+  "عندي حساسية مكسرات، شو أتجنب؟",
+  "عندكم قهوة مختصة؟",
+  "وجبة نباتية تحت الـ 10 دنانير",
+  "بدي إشي خفيف وسريع"
+];
+
+export default function AiWaiterChat({ tableNumber, cart = [], onAddToCart, onNavigate, onOrderPlaced, onClearCart, initialQuery, onClearInitialQuery }: AiWaiterChatProps) {
+  const [detectedLanguage, setDetectedLanguage] = useState<"en" | "ar">("en");
+  const [messages, setMessages] = useState<Message[]>([
+    {
+      id: "welcome-msg",
+      role: "assistant",
+      content: `Hello! I'm Ward | ورد, your AI Voice Waiter at Seleen Cafe. I speak English and Arabic (فصحى & اللهجة الأردنية) fluently.
+      
+مرحباً بك! أنا ورد | Ward، النادل الذكي الخاص بك في سيلين كافيه. أتحدث العربية والإنجليزية بطلاقة ومستعد لمساعدتك.
+
+I am always listening to your voice and ready to help. Just speak your order, request pairings, or ask about ingredients. I will compile your final order when you indicate you're finished!
+أنا أستمع إليك دائماً وجاهز للمساعدة. فقط تحدث لطلب الوجبات، الاستفسار عن المكونات، أو طلب التوصيات. سأقوم بتلخيص وتأكيد طلبك عندما تنتهي!`
+    }
+  ]);
+  const [inputValue, setInputValue] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [useAdvanced, setUseAdvanced] = useState(true);
+
+  // New states for the interactive minimalist Orb and Order Summaries
+  const [isSummarizing, setIsSummarizing] = useState(false);
+  const [summaryData, setSummaryData] = useState<{
+    items: { itemId: string; name: string; quantity: number; price: number; customizations?: string[] }[];
+    summaryTextEn: string;
+    summaryTextAr: string;
+  } | null>(null);
+  const [summaryError, setSummaryError] = useState("");
+  const [isSubmittingOrder, setIsSubmittingOrder] = useState(false);
+  const [submissionError, setSubmissionError] = useState("");
+  const [liveTranscript, setLiveTranscript] = useState("");
+
+  // Audio Playback states (for text-to-speech)
+  const [playingMsgId, setPlayingMsgId] = useState<string | null>(null);
+  const [isAiTalkingVisualizer, setIsAiTalkingVisualizer] = useState(false);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const audioDataArrayRef = useRef<Uint8Array | null>(null);
+  const visualizerFrameRef = useRef<number | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const audioSourcesRef = useRef<AudioBufferSourceNode[]>([]);
+
+  const startVisualizer = () => {
+    if (visualizerFrameRef.current) {
+      cancelAnimationFrame(visualizerFrameRef.current);
+    }
+    const updateVisualizer = () => {
+      if (analyserRef.current && audioDataArrayRef.current) {
+        analyserRef.current.getByteFrequencyData(audioDataArrayRef.current);
+        let sum = 0;
+        for (let i = 0; i < audioDataArrayRef.current.length; i++) {
+          sum += audioDataArrayRef.current[i];
+        }
+        const average = sum / audioDataArrayRef.current.length;
+        // Turn on speaking animation if there's audio signal
+        setIsAiTalkingVisualizer(average > 5);
+      }
+      visualizerFrameRef.current = requestAnimationFrame(updateVisualizer);
+    };
+    updateVisualizer();
+  };
+
+  const stopVisualizer = () => {
+    if (visualizerFrameRef.current) {
+      cancelAnimationFrame(visualizerFrameRef.current);
+      visualizerFrameRef.current = null;
+    }
+    setIsAiTalkingVisualizer(false);
+    
+    // Clear canvas when stopped
+    if (canvasRef.current) {
+      const ctx = canvasRef.current.getContext("2d");
+      if (ctx) {
+        ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+      }
+    }
+  };
+
+
+  // Streaming TTS Audio Queue refs
+  const ttsChunksRef = useRef<{ text: string; buffer?: AudioBuffer; fetched: boolean }[]>([]);
+  const ttsNextPlayTimeRef = useRef<number>(0);
+  const currentTtsIndexRef = useRef<number>(0);
+  const processedIndexRef = useRef<number>(0);
+  const accumulatedTextRef = useRef<string>("");
+  const isTtsStreamDoneRef = useRef<boolean>(true);
+
+  // Real-time Live API Voice State
+  const [isLiveActive, setIsLiveActive] = useState(false);
+  const [liveStatus, setLiveStatus] = useState<string>("");
+  const liveWsRef = useRef<WebSocket | null>(null);
+  
+  const liveMicStreamRef = useRef<MediaStream | null>(null);
+  const liveProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const liveNextPlayTimeRef = useRef<number>(0);
+
+  // Ephemeral Added Items Summary State
+  const [ephemeralSummary, setEphemeralSummary] = useState<{ items: CartItem[], timestamp: number } | null>(null);
+  const ephemeralTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const triggerEphemeralSummary = (addedItems: CartItem[]) => {
+    setEphemeralSummary({ items: addedItems, timestamp: Date.now() });
+    if (ephemeralTimeoutRef.current) {
+      clearTimeout(ephemeralTimeoutRef.current);
+    }
+    ephemeralTimeoutRef.current = setTimeout(() => {
+      setEphemeralSummary(null);
+    }, 4000);
+  };
+
+  // Speech to Text (Dictation) State
+  const [isSpeechSupported, setIsSpeechSupported] = useState(false);
+  const [isDictating, setIsDictating] = useState(false);
+  const isDictatingRef = useRef(false);
+  useEffect(() => {
+    isDictatingRef.current = isDictating;
+  }, [isDictating]);
+  const [voiceMode, setVoiceMode] = useState<"stt" | "live">("stt");
+  const recognitionRef = useRef<any>(null);
+  const dictationStreamRef = useRef<MediaStream | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<BlobPart[]>([]);
+  const [isVoiceSessionActive, setIsVoiceSessionActive] = useState(false);
+  const isVoiceSessionActiveRef = useRef(false);
+
+  // Human Personality Voice and Speed Config
+  const [selectedVoice, setSelectedVoice] = useState<"Aoede" | "Zephyr" | "Kore" | "Puck" | "Charon" | "Fenrir">("Aoede");
+  const selectedVoiceRef = useRef("Aoede");
+  const [speechRate, setSpeechRate] = useState<number>(1.0);
+  const speechRateRef = useRef(1.0);
+
+  useEffect(() => {
+    selectedVoiceRef.current = selectedVoice;
+  }, [selectedVoice]);
+
+  useEffect(() => {
+    speechRateRef.current = speechRate;
+  }, [speechRate]);
+
+  const useNativeTtsRef = useRef<boolean>(false);
+
+  // Audio muting state & ref
+  const [isAudioMuted, setIsAudioMuted] = useState<boolean>(false);
+  const isAudioMutedRef = useRef<boolean>(false);
+  useEffect(() => {
+    isAudioMutedRef.current = isAudioMuted;
+    if (isAudioMuted) {
+      stopAllAudio();
+    }
+  }, [isAudioMuted]);
+
+  // Pre-load browser speech voices early on mount
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.speechSynthesis) {
+      window.speechSynthesis.getVoices();
+      const handleVoicesChanged = () => {
+        if (window.speechSynthesis) {
+          window.speechSynthesis.getVoices();
+        }
+      };
+      window.speechSynthesis.onvoiceschanged = handleVoicesChanged;
+      return () => {
+        if (window.speechSynthesis) {
+          window.speechSynthesis.onvoiceschanged = null;
+        }
+      };
+    }
+  }, []);
+
+  const setupAnalyser = (ctx: AudioContext) => {
+    if (!analyserRef.current) {
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.connect(ctx.destination);
+      analyserRef.current = analyser;
+      audioDataArrayRef.current = new Uint8Array(analyser.frequencyBinCount);
+    }
+  };
+
+
+  // --- AUDIO PIPELINE DIAGNOSTIC LOGGER ---
+  const logAudioDiagnostics = (context: string) => {
+    console.log(`=== Audio Diagnostics [${context}] ===`);
+    
+    if (audioCtxRef.current) {
+      console.log(`AudioContext State: ${audioCtxRef.current.state}`);
+      console.log(`AudioContext Sample Rate: ${audioCtxRef.current.sampleRate} Hz`);
+      console.log(`AudioContext Base Latency: ${audioCtxRef.current.baseLatency}`);
+    } else {
+      console.log(`AudioContext: Not Initialized`);
+    }
+
+
+
+    console.log(`TTS Queue Size: ${ttsChunksRef.current.length}`);
+    console.log(`Current TTS Index: ${currentTtsIndexRef.current}`);
+    console.log(`Is TTS Stream Done: ${isTtsStreamDoneRef.current}`);
+    console.log(`Active Audio Sources: ${audioSourcesRef.current.length}`);
+    console.log(`====================================`);
+  };
+
+  // Unlock browser Web Audio API & SpeechSynthesis on user interaction to bypass autoplay restrictions
+  const unlockAudioPlayback = () => {
+    logAudioDiagnostics("Before unlockAudioPlayback");
+    try {
+      // 1. Initialize standard TTS AudioContext
+      if (!audioCtxRef.current) {
+        console.log("[Audio Lifecycle] Creating new standard TTS AudioContext...");
+        const ctx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+        audioCtxRef.current = ctx;
+        console.log(`[Audio Lifecycle] Standard TTS Context created. Sample Rate: ${ctx.sampleRate}Hz, Initial State: ${ctx.state}`);
+        setupAnalyser(ctx);
+      }
+      if (audioCtxRef.current && audioCtxRef.current.state === "suspended") {
+        console.log(`[Audio Lifecycle] Standard TTS Context is '${audioCtxRef.current.state}'. Attempting to resume...`);
+        audioCtxRef.current.resume().then(() => {
+          console.log(`[Audio Lifecycle] Standard TTS Context successfully transitioned to '${audioCtxRef.current?.state}'.`);
+        }).catch(err => console.warn(`[Audio Lifecycle] Failed to resume standard TTS Context: ${err}`));
+      } else {
+        console.log(`[Audio Lifecycle] Standard TTS Context already '${audioCtxRef.current.state}'.`);
+      }
+
+
+
+      // 3. Initialize SpeechSynthesis
+      if (typeof window !== "undefined" && window.speechSynthesis) {
+        if (window.speechSynthesis.paused) {
+          window.speechSynthesis.resume();
+        }
+        window.speechSynthesis.getVoices();
+        const dummyUtterance = new SpeechSynthesisUtterance("");
+        dummyUtterance.volume = 0.001;
+        window.speechSynthesis.speak(dummyUtterance);
+      }
+      logAudioDiagnostics("After unlockAudioPlayback");
+    } catch (e) {
+      console.warn("[Audio Lifecycle] Audio unlock attempt failed:", e);
+    }
+  };
+
+  // Test AI Voice output directly
+  const testVoice = () => {
+    unlockAudioPlayback();
+    setIsAudioMuted(false);
+    isAudioMutedRef.current = false;
+    stopAllAudio();
+
+    const isAr = detectedLanguage === "ar";
+    const testMsg = isAr
+      ? "مرحباً بك في كافيه سيلين! أنا ورد، نادلك الذكي. الصوت يعمل بنجاح الآن."
+      : "Hello and welcome to Seleen Cafe! I am Ward, your AI waiter. Voice output is working perfectly now.";
+
+    useNativeTtsRef.current = true;
+    ttsChunksRef.current = [];
+    currentTtsIndexRef.current = 0;
+    processedIndexRef.current = 0;
+    isTtsStreamDoneRef.current = true;
+
+    processStreamedTextForSpeech(testMsg, true);
+  };
+
+  // Live speaker voice tracking states
+  const [isLiveSpeaking, setIsLiveSpeaking] = useState(false);
+  const liveSpeakingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Proactive microphone permission state
+  const [micPermissionState, setMicPermissionState] = useState<"granted" | "denied" | "prompt" | "unknown">("unknown");
+  const [micError, setMicError] = useState<string | null>(null);
+
+  const messagesRef = useRef<Message[]>(messages);
+  const summaryDataRef = useRef<any>(null);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  useEffect(() => {
+    summaryDataRef.current = summaryData;
+  }, [summaryData]);
+
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  // Dynamic state refs for use inside speech callbacks to prevent stale closure issues
+  const isLoadingRef = useRef(isLoading);
+  useEffect(() => {
+    isLoadingRef.current = isLoading;
+  }, [isLoading]);
+
+  const playingMsgIdRef = useRef(playingMsgId);
+  useEffect(() => {
+    playingMsgIdRef.current = playingMsgId;
+  }, [playingMsgId]);
+
+  const detectedLanguageRef = useRef(detectedLanguage);
+  useEffect(() => {
+    detectedLanguageRef.current = detectedLanguage;
+  }, [detectedLanguage]);
+
+  useEffect(() => {
+    isVoiceSessionActiveRef.current = isVoiceSessionActive;
+  }, [isVoiceSessionActive]);
+
+  // Monitor microphone permission state and synchronize with browser permissions query if supported
+  useEffect(() => {
+    if (navigator.permissions && navigator.permissions.query) {
+      navigator.permissions.query({ name: "microphone" as any })
+        .then((permissionStatus) => {
+          setMicPermissionState(permissionStatus.state);
+          permissionStatus.onchange = () => {
+            setMicPermissionState(permissionStatus.state);
+          };
+        })
+        .catch((err) => {
+          console.warn("Could not query microphone permission status:", err);
+        });
+    }
+  }, []);
+
+  // Auto-scroll chat
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, isLoading]);
+
+  // Handle initial menu query passed from MenuView
+  useEffect(() => {
+    if (initialQuery && initialQuery.trim()) {
+      handleSendMessage(initialQuery);
+      if (onClearInitialQuery) {
+        onClearInitialQuery();
+      }
+    }
+  }, [initialQuery]);
+
+  // Async useEffect to properly initialize and configure the Web Speech API's SpeechRecognition instance on mount,
+  // and handle microphone access pre-checks and errors gracefully.
+  useEffect(() => {
+    const initializeSpeech = async () => {
+      try {
+        const SpeechRecognitionClass = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+        if (!SpeechRecognitionClass) {
+          console.warn("Speech recognition is not supported in this browser.");
+          setIsSpeechSupported(false);
+          return;
+        }
+        setIsSpeechSupported(true);
+
+        // Wrap navigator.mediaDevices.getUserMedia in a try-catch block to gracefully check mic access/hardware
+        try {
+          if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            stream.getTracks().forEach(track => {
+              try { track.stop(); } catch (e) {}
+            });
+            setMicPermissionState("granted");
+            setMicError(null);
+          } else {
+            throw new Error("getUserMedia is not supported in this browser.");
+          }
+        } catch (micErr: any) {
+          console.warn("Speech pre-check microphone access failed or was dismissed on mount:", micErr);
+          let friendlyErr = "";
+          if (micErr.name === "NotAllowedError" || micErr.name === "PermissionDeniedError") {
+            setMicPermissionState("denied");
+            friendlyErr = detectedLanguageRef.current === "ar"
+              ? "تم حظر صلاحية الميكروفون. يرجى تفعيلها من إعدادات المتصفح للتحدث مع النادل الذكي."
+              : "Microphone access was denied. Please enable it in browser settings to speak to the AI.";
+          } else if (micErr.name === "NotReadableError" || micErr.name === "TrackStartError") {
+            friendlyErr = detectedLanguageRef.current === "ar"
+              ? "الميكروفون قيد الاستخدام حالياً أو مشغول بواسطة تطبيق آخر."
+              : "Microphone is busy or blocked by another application.";
+          } else if (micErr.name === "NotFoundError" || micErr.name === "DevicesNotFoundError") {
+            friendlyErr = detectedLanguageRef.current === "ar"
+              ? "لم يتم العثور على ميكروفون متصل بجهازك."
+              : "No microphone found on your device.";
+          } else {
+            friendlyErr = detectedLanguageRef.current === "ar"
+              ? `فشل الوصول للميكروفون: ${micErr.message || micErr.name}`
+              : `Microphone error: ${micErr.message || micErr.name}`;
+          }
+          setMicError(friendlyErr);
+        }
+
+        // Create the single static SpeechRecognition instance
+        const rec = new SpeechRecognitionClass();
+        rec.continuous = true;
+        rec.interimResults = true;
+        rec.lang = detectedLanguageRef.current === "ar" ? "ar-JO" : "en-US";
+
+        // Bind callback event handlers referencing state-refs to prevent closure issues
+        rec.onstart = () => {
+          setIsDictating(true);
+          isDictatingRef.current = true;
+          setLiveTranscript("");
+        };
+
+        rec.onresult = (event: any) => {
+          if (isLoadingRef.current) {
+            console.log("Ignoring speech input while AI is thinking/loading.");
+            return;
+          }
+
+          let interimTranscript = "";
+          let finalTranscript = "";
+
+          for (let i = event.resultIndex; i < event.results.length; ++i) {
+            if (event.results[i].isFinal) {
+              finalTranscript += event.results[i][0].transcript;
+            } else {
+              interimTranscript += event.results[i][0].transcript;
+            }
+          }
+
+          const currentText = finalTranscript || interimTranscript;
+          if (currentText && currentText.trim()) {
+            if (playingMsgIdRef.current !== null) {
+              const spokenText = getRecentSpokenText();
+              if (isEchoOfSpokenText(currentText, spokenText)) {
+                console.log("Ignored echo of AI voice:", currentText);
+                return;
+              } else {
+                console.log("User interrupted AI voice with speech:", currentText);
+                stopAllAudio();
+              }
+            }
+
+            setLiveTranscript(currentText);
+            setInputValue(currentText);
+          }
+
+          if (finalTranscript && finalTranscript.trim()) {
+            console.log("Transcribed speech-to-text input (final):", finalTranscript);
+            setInputValue(finalTranscript);
+            setLiveTranscript(finalTranscript);
+
+            const containsArabic = /[\u0600-\u06FF]/.test(finalTranscript);
+            if (containsArabic) {
+              setDetectedLanguage("ar");
+            }
+
+            handleSendMessage(finalTranscript);
+          }
+        };
+
+        rec.onerror = (err: any) => {
+          console.warn("Speech recognition warning:", err?.error || err);
+          setIsDictating(false);
+          isDictatingRef.current = false;
+          
+          if (err.error === "not-allowed" || err.error === "permission-denied") {
+            setMicPermissionState("denied");
+          }
+          
+          if (err.error === "not-allowed" || err.error === "audio-capture") {
+            const isAr = detectedLanguageRef.current === "ar";
+            const errMsg = isAr
+              ? "عذراً، لم نتمكن من تشغيل الميكروفون للتعرف على الصوت. يرجى التأكد من تفعيل صلاحية الميكروفون في متصفحك."
+              : "Sorry, we couldn't access your microphone for speech recognition. Please ensure microphone permissions are granted in your browser settings.";
+
+            setMessages(prev => [
+              ...prev,
+              {
+                id: `err-mic-dictation-${Date.now()}`,
+                role: "assistant",
+                content: errMsg
+              }
+            ]);
+          }
+        };
+
+        rec.onend = () => {
+          setIsDictating(false);
+          isDictatingRef.current = false;
+          
+          if (isVoiceSessionActiveRef.current) {
+            console.log("Speech recognition ended but voice session is active. Auto-restarting always-ready mic...");
+            setTimeout(() => {
+              if (isVoiceSessionActiveRef.current) {
+                try {
+                  recognitionRef.current?.start();
+                } catch (e) {
+                  console.warn("Error auto-restarting speech recognition instance:", e);
+                }
+              }
+            }, 150);
+          }
+        };
+
+        recognitionRef.current = rec;
+        
+        if (isVoiceSessionActiveRef.current) {
+          try {
+            rec.start();
+          } catch (e) {
+            console.warn("Auto-starting speech recognition on mount:", e);
+          }
+        }
+      } catch (err) {
+        console.error("Failed to initialize speech recognition in async useEffect:", err);
+      }
+    };
+
+    initializeSpeech();
+  }, []);
+
+  // Update language and restart recognition if language changes dynamically
+  useEffect(() => {
+    if (recognitionRef.current) {
+      recognitionRef.current.lang = detectedLanguage === "ar" ? "ar-JO" : "en-US";
+      if (isVoiceSessionActiveRef.current) {
+        console.log("Language changed, restarting speech recognition with new language:", detectedLanguage);
+        try { recognitionRef.current.stop(); } catch (e) {}
+      }
+    }
+  }, [detectedLanguage]);
+
+  const stopDictationStream = () => {
+    if (dictationStreamRef.current) {
+      dictationStreamRef.current.getTracks().forEach(track => {
+        try { track.stop(); } catch (e) {}
+      });
+      dictationStreamRef.current = null;
+    }
+  };
+
+  // Cleanup audio playbacks and streams on unmount
+  useEffect(() => {
+    return () => {
+      stopAllAudio();
+      stopLiveSession();
+      stopDictationStream();
+      if (recognitionRef.current) {
+        try { recognitionRef.current.abort(); } catch (e) {}
+      }
+    };
+  }, []);
+
+  const getRecentSpokenText = (): string => {
+    const startIndex = Math.max(0, currentTtsIndexRef.current - 3);
+    const endIndex = currentTtsIndexRef.current;
+    return ttsChunksRef.current
+      .slice(startIndex, endIndex)
+      .map(c => c.text)
+      .join(" ");
+  };
+
+  const isEchoOfSpokenText = (transcribed: string, spoken: string): boolean => {
+    if (!transcribed || !spoken) return false;
+    
+    // Normalize strings: lowercase, remove non-alphanumeric/spaces, keeping Arabic characters
+    const normalize = (str: string) => 
+      str.toLowerCase()
+         .replace(/[^\w\s\u0600-\u06FF]/g, "")
+         .replace(/\s+/g, " ")
+         .trim();
+         
+    const normTrans = normalize(transcribed);
+    const normSpoken = normalize(spoken);
+    
+    if (!normTrans) return false;
+    
+    // If the spoken text contains the transcribed text, it's very likely echo
+    if (normSpoken.includes(normTrans)) return true;
+    
+    // Also check word overlap
+    const transWords = normTrans.split(" ");
+    const spokenWords = new Set(normSpoken.split(" "));
+    
+    let overlapCount = 0;
+    for (const word of transWords) {
+      if (spokenWords.has(word)) {
+        overlapCount++;
+      }
+    }
+    
+    const overlapRatio = overlapCount / transWords.length;
+    // If more than 50% of transcribed words overlap with spoken words, it's likely echo
+    return overlapRatio > 0.5;
+  };
+
+  const restartSpeechRecognition = () => {
+    if (!isVoiceSessionActiveRef.current) return;
+    if (isDictatingRef.current) return;
+
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+
+    console.log("Auto-restarting speech recognition...");
+    startSpeechRecognition();
+  };
+
+  
+  const startSpeechRecognition = async () => {
+    // 1. Wrap navigator.mediaDevices.getUserMedia in a try-catch block to gracefully handle mic access failures
+    try {
+      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach(track => {
+          try { track.stop(); } catch (e) {}
+        });
+        setMicPermissionState("granted");
+        setMicError(null);
+      } else {
+        throw new Error("getUserMedia is not supported in this browser.");
+      }
+    } catch (micErr: any) {
+      console.warn("SpeechRecognition pre-check microphone access failed or was dismissed:", micErr);
+      
+      let friendlyErr = "";
+      if (micErr.name === "NotAllowedError" || micErr.name === "PermissionDeniedError") {
+        setMicPermissionState("denied");
+        friendlyErr = detectedLanguage === "ar"
+          ? "تم حظر صلاحية الميكروفون. يرجى تفعيلها من إعدادات المتصفح للتحدث مع النادل الذكي."
+          : "Microphone access was denied. Please enable it in browser settings to speak to the AI.";
+      } else if (micErr.name === "NotReadableError" || micErr.name === "TrackStartError") {
+        friendlyErr = detectedLanguage === "ar"
+          ? "الميكروفون قيد الاستخدام حالياً أو مشغول بواسطة تطبيق آخر."
+          : "Microphone is busy or blocked by another application.";
+      } else if (micErr.name === "NotFoundError" || micErr.name === "DevicesNotFoundError") {
+        friendlyErr = detectedLanguage === "ar"
+          ? "لم يتم العثور على ميكروفون متصل بجهازك."
+          : "No microphone found on your device.";
+      } else {
+        friendlyErr = detectedLanguage === "ar"
+          ? `فشل الوصول للميكروفون: ${micErr.message || micErr.name}`
+          : `Microphone error: ${micErr.message || micErr.name}`;
+      }
+      setMicError(friendlyErr);
+      
+      // Post the friendly error cleanly in the assistant messages list instead of failing silently
+      const isAr = detectedLanguage === "ar";
+      const errMsg = isAr
+        ? `عذراً، لم نتمكن من تشغيل الميكروفون للتعرف على الصوت (${friendlyErr}). يرجى التأكد من تفعيل صلاحية الميكروفون في متصفحك.`
+        : `Sorry, we couldn't access your microphone for speech recognition (${friendlyErr}). Please ensure microphone permissions are granted in your browser settings.`;
+
+      setMessages(prev => [
+        ...prev,
+        {
+          id: `err-mic-dictation-${Date.now()}`,
+          role: "assistant",
+          content: errMsg
+        }
+      ]);
+      return;
+    }
+
+    // 2. Ensure SpeechRecognition API is correctly initialized
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      console.warn("Speech recognition is not supported in this browser.");
+      return;
+    }
+
+    // Re-create the instance if it has been cleared for any reason
+    if (!recognitionRef.current) {
+      const rec = new SpeechRecognition();
+      rec.continuous = true;
+      rec.interimResults = true;
+      rec.lang = detectedLanguage === "ar" ? "ar-JO" : "en-US";
+
+      rec.onstart = () => {
+        setIsDictating(true);
+        isDictatingRef.current = true;
+        setLiveTranscript("");
+      };
+
+      rec.onresult = (event: any) => {
+        if (isLoadingRef.current) {
+          console.log("Ignoring speech input while AI is thinking/loading.");
+          return;
+        }
+
+        let interimTranscript = "";
+        let finalTranscript = "";
+
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          if (event.results[i].isFinal) {
+            finalTranscript += event.results[i][0].transcript;
+          } else {
+            interimTranscript += event.results[i][0].transcript;
+          }
+        }
+
+        const currentText = finalTranscript || interimTranscript;
+        if (currentText && currentText.trim()) {
+          if (playingMsgIdRef.current !== null) {
+            const spokenText = getRecentSpokenText();
+            if (isEchoOfSpokenText(currentText, spokenText)) {
+              console.log("Ignored echo of AI voice:", currentText);
+              return;
+            } else {
+              console.log("User interrupted AI voice with speech:", currentText);
+              stopAllAudio();
+            }
+          }
+
+          setLiveTranscript(currentText);
+          setInputValue(currentText);
+        }
+
+        if (finalTranscript && finalTranscript.trim()) {
+          console.log("Transcribed speech-to-text input (final):", finalTranscript);
+          setInputValue(finalTranscript);
+          setLiveTranscript(finalTranscript);
+
+          const containsArabic = /[\u0600-\u06FF]/.test(finalTranscript);
+          if (containsArabic) {
+            setDetectedLanguage("ar");
+          }
+
+          handleSendMessage(finalTranscript);
+        }
+      };
+
+      rec.onerror = (err: any) => {
+        console.warn("Speech recognition warning:", err?.error || err);
+        setIsDictating(false);
+        isDictatingRef.current = false;
+        
+        if (err.error === "not-allowed" || err.error === "permission-denied") {
+          setMicPermissionState("denied");
+        }
+        
+        if (err.error === "not-allowed" || err.error === "audio-capture") {
+          const isAr = detectedLanguageRef.current === "ar";
+          const errMsg = isAr
+            ? "عذراً، لم نتمكن من تشغيل الميكروفون للتعرف على الصوت. يرجى التأكد من تفعيل صلاحية الميكروفون في متصفحك."
+            : "Sorry, we couldn't access your microphone for speech recognition. Please ensure microphone permissions are granted in your browser settings.";
+
+          setMessages(prev => [
+            ...prev,
+            {
+              id: `err-mic-dictation-${Date.now()}`,
+              role: "assistant",
+              content: errMsg
+            }
+          ]);
+        }
+      };
+
+      rec.onend = () => {
+        setIsDictating(false);
+        isDictatingRef.current = false;
+        
+        if (isVoiceSessionActiveRef.current) {
+          console.log("Speech recognition ended but voice session is active. Auto-restarting always-ready mic...");
+          setTimeout(() => {
+            if (isVoiceSessionActiveRef.current) {
+              try {
+                recognitionRef.current?.start();
+              } catch (e) {
+                console.warn("Error auto-restarting speech recognition instance:", e);
+              }
+            }
+          }, 300);
+        }
+      };
+
+      recognitionRef.current = rec;
+    }
+
+    if (isDictatingRef.current) return;
+
+    try {
+      recognitionRef.current.lang = detectedLanguage === "ar" ? "ar-JO" : "en-US";
+      recognitionRef.current.start();
+    } catch (err: any) {
+      console.warn("Failed to start SpeechRecognition:", err);
+    }
+  };
+
+  const toggleDictation = async () => {
+    unlockAudioPlayback();
+    if (isDictating) {
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+        mediaRecorderRef.current.stop();
+      }
+      stopDictationStream();
+      setIsDictating(false);
+    } else {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        dictationStreamRef.current = stream;
+        const mediaRecorder = new MediaRecorder(stream);
+        mediaRecorderRef.current = mediaRecorder;
+        audioChunksRef.current = [];
+
+        mediaRecorder.ondataavailable = (e) => {
+          if (e.data.size > 0) {
+            audioChunksRef.current.push(e.data);
+          }
+        };
+
+        mediaRecorder.onstop = async () => {
+          stopDictationStream();
+          const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+          
+          // Convert Blob to Base64
+          const reader = new FileReader();
+          reader.readAsDataURL(audioBlob);
+          reader.onloadend = async () => {
+            const base64data = reader.result?.toString().split(",")[1];
+            if (base64data) {
+              setLiveTranscript(detectedLanguage === "ar" ? "جاري تحويل الصوت..." : "Transcribing audio...");
+              try {
+                const response = await fetch("/api/gemini/transcribe", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ audioData: base64data, mimeType: "audio/webm" })
+                });
+                if (response.ok) {
+                  const data = await response.json();
+
+                  if (data.text) {
+                    setLiveTranscript(data.text);
+                    setInputValue(data.text);
+                    
+                    const containsArabic = /[\u0600-\u06FF]/.test(data.text);
+                    if (containsArabic) {
+                      setDetectedLanguage("ar");
+                    }
+                    
+                    handleSendMessage(data.text);
+                  }
+                } else {
+                  setLiveTranscript(detectedLanguage === "ar" ? "فشل التعرف على الصوت." : "Transcription failed.");
+                }
+              } catch (err) {
+                console.error("Transcription error:", err);
+                setLiveTranscript(detectedLanguage === "ar" ? "حدث خطأ." : "Error occurred.");
+              }
+            }
+          };
+        };
+
+        mediaRecorder.start();
+        setIsDictating(true);
+        setLiveTranscript(detectedLanguage === "ar" ? "تحدث الآن..." : "Speak now...");
+      } catch (err) {
+        console.error("Mic error:", err);
+        setMicPermissionState("denied");
+      }
+    }
+  };
+
+  const stopAllAudio = () => {
+    // Stop native speech synthesis
+    if (typeof window !== "undefined" && window.speechSynthesis) {
+      try { window.speechSynthesis.cancel(); } catch (e) {}
+    }
+    audioSourcesRef.current.forEach(source => {
+      try { source.stop(); } catch(e){}
+    });
+    audioSourcesRef.current = [];
+
+    // Reset standard TTS streaming queue
+    ttsChunksRef.current = [];
+    currentTtsIndexRef.current = 0;
+    ttsNextPlayTimeRef.current = 0;
+    processedIndexRef.current = 0;
+    accumulatedTextRef.current = "";
+    isTtsStreamDoneRef.current = true;
+
+    setPlayingMsgId(null);
+    stopVisualizer();
+  };
+
+  // Queue a segment of text to be translated into audio and played sequentially
+  const queueTTSChunk = (text: string) => {
+    if (isAudioMutedRef.current) return;
+
+    // Clean text from emojis, markdown symbols, asterisks, etc. to prevent TTS from reading them
+    const cleanText = text
+      .replace(/[*_~`#\-+]/g, "") // Remove markdown characters
+      .replace(/[\uD800-\uDFFF]./g, "") // Remove standard emojis
+      .replace(/[^\w\s\u0600-\u06FF\d.,!?;:()""'']/g, "") // Keep only alphanumeric, spaces, and punctuation
+      .trim();
+
+    if (!cleanText) return;
+
+    const chunkIndex = ttsChunksRef.current.length;
+    console.log(`[Voice Pipeline] AI text generated for chunk: "${cleanText}"`);
+    ttsChunksRef.current.push({ text: cleanText, fetched: false });
+
+    // Start fetching and decoding this chunk in the background
+    fetchAndDecodeTTSChunk(cleanText, chunkIndex);
+  };
+
+  // Fetch from /api/gemini/tts and decode to AudioBuffer
+  const fetchAndDecodeTTSChunk = async (text: string, index: number) => {
+    console.log(`[Voice Pipeline] TTS request sent for chunk ${index}: "${text}"`);
+    // If we've already triggered browser native TTS fallback, don't query the API
+    if (useNativeTtsRef.current) {
+      if (ttsChunksRef.current[index]) {
+        ttsChunksRef.current[index].fetched = true;
+      }
+      scheduleTtsPlayback();
+      return;
+    }
+
+    try {
+      const response = await fetch("/api/gemini/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, voice: selectedVoiceRef.current })
+      });
+
+      if (!response.ok) {
+        if (response.status === 429 || response.status === 500) {
+          console.warn("TTS API failure or quota exhausted. Activating native SpeechSynthesis fallback mode.");
+          useNativeTtsRef.current = true;
+        }
+        throw new Error("TTS generation failed");
+      }
+
+      const data = await response.json();
+      console.log(`[Voice Pipeline] TTS response received for chunk ${index}`);
+      if (data.useNative) {
+        console.log("Server indicated TTS quota exceeded. Activating native SpeechSynthesis fallback mode.");
+        useNativeTtsRef.current = true;
+        if (ttsChunksRef.current[index]) {
+          ttsChunksRef.current[index].fetched = true;
+        }
+        scheduleTtsPlayback();
+        return;
+      }
+
+      if (!data.audio) {
+        throw new Error("No audio payload returned");
+      }
+
+
+
+      const audioCtx = audioCtxRef.current;
+      if (!audioCtx) {
+        console.warn("No audio context available for TTS decoding. Falling back to native.");
+        useNativeTtsRef.current = true;
+        scheduleTtsPlayback();
+        return;
+      }
+      if (audioCtx.state === "suspended") {
+        await audioCtx.resume();
+      }
+
+      const binary = atob(data.audio);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+
+      const int16 = new Int16Array(bytes.buffer);
+      const float32 = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) {
+        float32[i] = int16[i] / 32768.0;
+      }
+
+      const audioBuffer = audioCtx.createBuffer(1, float32.length, 24000);
+      audioBuffer.getChannelData(0).set(float32);
+
+      console.log(`[Voice Pipeline] Audio file or stream created for chunk ${index} (Web Audio Buffer)`);
+      // Save the decoded buffer in our chunk array
+      if (ttsChunksRef.current[index]) {
+        ttsChunksRef.current[index].buffer = audioBuffer;
+        ttsChunksRef.current[index].fetched = true;
+      }
+
+      // Trigger the sequential playback scheduler
+      scheduleTtsPlayback();
+
+    } catch (err) {
+      console.warn(`Error or quota limit during TTS chunk ${index} fetch. Falling back to native SpeechSynthesis:`, err);
+      useNativeTtsRef.current = true;
+      // Mark as fetched so the queue doesn't block forever if a chunk fails
+      if (ttsChunksRef.current[index]) {
+        ttsChunksRef.current[index].fetched = true;
+      }
+      scheduleTtsPlayback();
+    }
+  };
+
+  const isSchedulingRef = useRef(false);
+
+  // Schedule playback sequentially to guarantee correct sentence/clause ordering
+  const scheduleTtsPlayback = async () => {
+    if (isSchedulingRef.current) return;
+    isSchedulingRef.current = true;
+    try {
+      while (currentTtsIndexRef.current < ttsChunksRef.current.length) {
+      const currentChunk = ttsChunksRef.current[currentTtsIndexRef.current];
+
+      // If the next chunk is not fetched yet, wait for it (prevent out of order play)
+      if (!currentChunk.fetched) {
+        break;
+      }
+
+      // Reusable browser native fallback for speech synthesis if audio buffer generation failed
+      const speakFallback = () => {
+        if (isAudioMutedRef.current) {
+          return false;
+        }
+
+        if (typeof window !== "undefined" && window.speechSynthesis) {
+          const synth = window.speechSynthesis;
+          if (synth.paused) {
+            try { synth.resume(); } catch (e) {}
+          }
+
+          console.log(`[Voice Pipeline] Audio file or stream created for chunk (Native SpeechSynthesis)`);
+          const textToSpeak = currentChunk.text;
+          const utterance = new SpeechSynthesisUtterance(textToSpeak);
+          
+          // Detect Arabic to set correct language
+          const containsArabic = /[\u0600-\u06FF]/.test(textToSpeak);
+          utterance.lang = containsArabic ? "ar-JO" : "en-US";
+          
+          const voices = synth.getVoices();
+          
+          const currentVoiceId = selectedVoiceRef.current;
+          const isFemale = currentVoiceId === "Zephyr" || currentVoiceId === "Kore";
+          let selectedFallbackVoice: SpeechSynthesisVoice | null = null;
+          
+          if (containsArabic) {
+            const arVoices = voices.filter(v => v.lang.startsWith("ar"));
+            
+            // 1. Try to find Arabic voices of the correct gender with premium keywords
+            const genderKeywords = isFemale 
+              ? ["female", "hoda", "salma", "laila", "naay", "zeina", "yasmine"] 
+              : ["male", "amin", "maged", "tarif", "shakir", "hamed"];
+              
+            const premiumVoices = arVoices.filter(v => {
+              const nameLower = v.name.toLowerCase();
+              return genderKeywords.some(keyword => nameLower.includes(keyword)) || nameLower.includes("natural") || nameLower.includes("google");
+            });
+            
+            if (premiumVoices.length > 0) {
+              selectedFallbackVoice = premiumVoices[0];
+            } else {
+              // 2. Fall back to correct gender based on simple name-checking
+              const genderFallback = arVoices.filter(v => {
+                const nameLower = v.name.toLowerCase();
+                if (isFemale) {
+                  return nameLower.includes("female") || !nameLower.includes("male");
+                } else {
+                  return nameLower.includes("male");
+                }
+              });
+              if (genderFallback.length > 0) {
+                selectedFallbackVoice = genderFallback[0];
+              } else {
+                selectedFallbackVoice = arVoices[0] || null;
+              }
+            }
+          } else {
+            const enVoices = voices.filter(v => v.lang.startsWith("en"));
+            
+            // 1. Try to find Natural/Online voices first (extremely human-sounding)
+            const naturalVoices = enVoices.filter(v => v.name.toLowerCase().includes("natural"));
+            
+            // Filter by correct gender
+            const femaleKeywords = ["aria", "siri", "samantha", "zira", "hazel", "susan", "female", "amira", "yasmin"];
+            const maleKeywords = ["guy", "david", "george", "daniel", "male", "karam", "faris", "rakan"];
+            const genderKeywords = isFemale ? femaleKeywords : maleKeywords;
+            
+            const genderSpecificNatural = naturalVoices.filter(v => {
+              const nameLower = v.name.toLowerCase();
+              return genderKeywords.some(keyword => nameLower.includes(keyword));
+            });
+            
+            if (genderSpecificNatural.length > 0) {
+              selectedFallbackVoice = genderSpecificNatural[0];
+            } else if (naturalVoices.length > 0) {
+              selectedFallbackVoice = naturalVoices[0];
+            } else {
+              // 2. Try Google Premium voices or Siri/Apple Premium
+              const premiumKeywords = ["google", "siri", "apple", "premium"];
+              const premiumVoices = enVoices.filter(v => {
+                const nameLower = v.name.toLowerCase();
+                return premiumKeywords.some(keyword => nameLower.includes(keyword)) && 
+                       genderKeywords.some(gk => nameLower.includes(gk));
+              });
+              
+              if (premiumVoices.length > 0) {
+                selectedFallbackVoice = premiumVoices[0];
+              } else {
+                // 3. Fall back to standard gender-specific voices (e.g. Samantha, Zira for female, David for male)
+                const genderVoices = enVoices.filter(v => {
+                  const nameLower = v.name.toLowerCase();
+                  return genderKeywords.some(keyword => nameLower.includes(keyword));
+                });
+                
+                if (genderVoices.length > 0) {
+                  selectedFallbackVoice = genderVoices[0];
+                } else {
+                  selectedFallbackVoice = enVoices.find(v => v.lang.startsWith("en-US")) || enVoices[0] || null;
+                }
+              }
+            }
+          }
+          
+          if (selectedFallbackVoice) {
+            utterance.voice = selectedFallbackVoice;
+          }
+          
+          // Use current configured speed
+          utterance.rate = speechRateRef.current || 1.0;
+          
+          const index = currentTtsIndexRef.current;
+          
+          utterance.onstart = () => {
+            console.log(`[Voice Pipeline] Playback started for chunk ${index} (Native SpeechSynthesis)`);
+            setIsAiTalkingVisualizer(true);
+          };
+
+          utterance.onend = () => {
+            console.log(`[Voice Pipeline] Playback completed for chunk ${index} (Native SpeechSynthesis)`);
+            setIsAiTalkingVisualizer(false);
+            currentTtsIndexRef.current = index + 1;
+            console.log(`[Voice Pipeline] Playback completed for chunk ${index} (Web Audio)`);
+        if (index === ttsChunksRef.current.length - 1 && isTtsStreamDoneRef.current) {
+              setPlayingMsgId(null);
+              if (isVoiceSessionActiveRef.current) {
+                setTimeout(() => {
+                  restartSpeechRecognition();
+                }, 300);
+              }
+            } else {
+              scheduleTtsPlayback();
+            }
+          };
+
+          utterance.onerror = (e) => {
+            setIsAiTalkingVisualizer(false);
+            if (e.error === "interrupted" || e.error === "canceled") {
+              console.log("SpeechSynthesis utterance was gracefully interrupted or canceled.");
+            } else {
+              console.warn("SpeechSynthesis utterance warning:", e.error || e);
+            }
+            currentTtsIndexRef.current = index + 1;
+            if (index === ttsChunksRef.current.length - 1 && isTtsStreamDoneRef.current) {
+              setPlayingMsgId(null);
+              if (isVoiceSessionActiveRef.current) {
+                setTimeout(() => {
+                  restartSpeechRecognition();
+                }, 300);
+              }
+            } else {
+              scheduleTtsPlayback();
+            }
+          };
+          
+          (window as any).__utteranceStorage = utterance; // Prevent GC bug
+          synth.speak(utterance);
+          return true;
+        }
+        return false;
+      };
+
+      // If it failed or has no buffer, fallback to native speechSynthesis
+      if (!currentChunk.buffer) {
+        if (speakFallback()) {
+          break; // Stop Web Audio queue; the speechSynthesis callback will resume the next chunks
+        } else {
+          currentTtsIndexRef.current++;
+          continue;
+        }
+      }
+
+      const buffer = currentChunk.buffer;
+
+
+
+      const audioCtx = audioCtxRef.current;
+      if (!audioCtx) {
+        // Fall back to Web Speech API if AudioContext cannot be initialized
+        if (speakFallback()) {
+          break;
+        } else {
+          currentTtsIndexRef.current++;
+          continue;
+        }
+      }
+      
+      if (!analyserRef.current) {
+        setupAnalyser(audioCtx);
+      }
+
+      await ensureAudioContextRunning();
+
+      // Schedule the source node
+      const source = audioCtx.createBufferSource();
+      source.buffer = buffer;
+      source.playbackRate.value = speechRateRef.current; // Apply human speech rate
+      
+      if (analyserRef.current) {
+        source.connect(analyserRef.current);
+      } else {
+        source.connect(audioCtx.destination);
+      }
+
+      const index = currentTtsIndexRef.current;
+      const startTime = Math.max(audioCtx.currentTime, ttsNextPlayTimeRef.current);
+      source.start(startTime);
+      console.log(`[Voice Pipeline] Playback started for chunk ${index} (Web Audio)`);
+      logAudioDiagnostics("Playback Started");
+      
+      startVisualizer();
+
+      // Playback duration is compressed or stretched by playback speed
+      const duration = buffer.duration / speechRateRef.current;
+      ttsNextPlayTimeRef.current = startTime + duration;
+      audioSourcesRef.current.push(source);
+      source.onended = () => {
+        // Clear active speaking playing state if this was the last chunk in the queue and the text stream is finished
+        if (index === ttsChunksRef.current.length - 1 && isTtsStreamDoneRef.current) {
+          setPlayingMsgId(null);
+          stopVisualizer();
+          if (isVoiceSessionActiveRef.current) {
+            setTimeout(() => {
+              restartSpeechRecognition();
+            }, 300);
+          }
+        }
+      };
+
+      currentTtsIndexRef.current++;
+    }
+    } finally {
+      isSchedulingRef.current = false;
+    }
+  };
+
+  // Process newly received streamed text segments in real time for ultra-low latency TTS playback
+  const processStreamedTextForSpeech = (fullText: string, isDone: boolean = false) => {
+    // Clean out markdown characters for the segmenter
+    const cleanFullText = fullText
+      .replace(/\*\*/g, "")
+      .replace(/\*/g, "")
+      .replace(/#/g, "")
+      .replace(/- /g, "");
+
+    const pendingText = cleanFullText.substring(processedIndexRef.current);
+    
+    // Find sentence or clause boundaries: periods, questions, exclamation, newlines, Arabic and English commas, colons
+    const boundaryRegex = /([.?!:;،,;\n]+)/g;
+    
+    let match;
+    let lastIndex = 0;
+    
+    while ((match = boundaryRegex.exec(pendingText)) !== null) {
+      const boundaryChar = match[0];
+      const boundaryIndex = match.index;
+      
+      const segment = pendingText.substring(lastIndex, boundaryIndex + boundaryChar.length).trim();
+      if (segment) {
+        queueTTSChunk(segment);
+      }
+      lastIndex = boundaryIndex + boundaryChar.length;
+      processedIndexRef.current += lastIndex;
+    }
+    
+    if (isDone) {
+      const finalSegment = cleanFullText.substring(processedIndexRef.current).trim();
+      if (finalSegment) {
+        queueTTSChunk(finalSegment);
+      }
+      processedIndexRef.current = cleanFullText.length;
+    } else {
+      // For ultra-fast voice startup: if chunk 1 is empty, dispatch as soon as 18+ chars exist on space boundary
+      const remainingText = cleanFullText.substring(processedIndexRef.current);
+      const minLength = ttsChunksRef.current.length === 0 ? 18 : 45;
+      
+      if (remainingText.length >= minLength) {
+        const lastSpace = remainingText.lastIndexOf(" ");
+        if (lastSpace > 12) {
+          const chunk = remainingText.substring(0, lastSpace).trim();
+          queueTTSChunk(chunk);
+          processedIndexRef.current += lastSpace + 1;
+        }
+      }
+    }
+  };
+
+  // Play/Stop speech button triggers
+  const playSpeech = async (msgId: string, text: string) => {
+    if (playingMsgId === msgId) {
+      stopAllAudio();
+      return;
+    }
+
+    stopAllAudio();
+    setPlayingMsgId(msgId);
+
+    // Segment and play the whole text instantly as a stream of buffers
+    processStreamedTextForSpeech(text, true);
+  };
+
+  // Single voice profile for Ward | ورد - Seleen Cafe's AI Waiter
+  const VOICE_PROFILES = [
+    {
+      id: "Aoede" as const,
+      nameEn: "Ward",
+      nameAr: "ورد",
+      descriptionEn: "Ward | ورد - Seleen Cafe's dedicated AI Voice Waiter.",
+      descriptionAr: "ورد | Ward - النادل الصوتي الذكي في سيلين كافيه.",
+      accentEn: "Warm & Natural",
+      accentAr: "صوت طبيعي دافئ ومضياف",
+      avatar: "🎙️",
+      greetEn: "Hello! I am Ward. It is a pleasure to serve you today at Seleen Cafe. What can I get started for you?",
+      greetAr: "أهلاً بك! أنا ورد وسعيد جداً بخدمتك اليوم في سيلين كافيه. شو بتحب تطلب؟"
+    }
+  ];
+
+  const handleSelectHost = (voiceId: "Aoede" | "Zephyr" | "Kore" | "Puck" | "Charon" | "Fenrir") => {
+    setSelectedVoice(voiceId);
+    selectedVoiceRef.current = voiceId;
+  };
+
+  // Send standard text chat
+  const handleSendMessage = async (text: string) => {
+    if (!text.trim()) return;
+    stopAllAudio();
+    isTtsStreamDoneRef.current = false;
+
+    // Unlock browser audio context & speech synthesis on user interaction
+    unlockAudioPlayback();
+
+    const perfStartTime = performance.now();
+    let loggedFirstToken = false;
+
+    const containsArabic = /[\u0600-\u06FF]/.test(text);
+    if (containsArabic) {
+      setDetectedLanguage("ar");
+    } else if (text.toLowerCase().includes("speak english") || text.toLowerCase().includes("prefer english")) {
+      setDetectedLanguage("en");
+    }
+
+    const userMsg: Message = {
+      id: `user-${Date.now()}`,
+      role: "user",
+      content: text
+    };
+
+    setMessages(prev => [...prev, userMsg]);
+    setInputValue("");
+
+    if (summaryDataRef.current) {
+      const cleanText = text.trim().toLowerCase();
+      
+      const isYes = [
+        "yes", "confirm", "place order", "yeah", "yep", "sure", "ok", "okay", "correct", "perfect",
+        "نعم", "أكد", "أرسل الطلب", "نعم صحيح", "صحيح", "أكيد", "اه", "إي", "ابشر", "أبشر", "موافق", "ارسل الطلب"
+      ].some(keyword => cleanText.includes(keyword));
+      
+      const isNo = [
+        "no", "cancel", "decline", "change", "don't", "stop", "incorrect", "wrong", "delete",
+        "لا", "إلغاء", "تعديل", "لا غلط", "غلط", "تغيير", "غير صحيح", "إلغي", "الغاء", "الغي", "تعدل"
+      ].some(keyword => cleanText.includes(keyword));
+
+      if (isYes) {
+        handleConfirmOrder();
+        return;
+      } else if (isNo) {
+        handleCancelOrder();
+        const isJustNo = ["no", "la", "لا", "cancel", "إلغاء", "الغاء", "غلط"].some(k => cleanText === k);
+        if (!isJustNo) {
+          setTimeout(() => {
+            handleSendMessage(text);
+          }, 500);
+        }
+        return;
+      }
+    }
+
+    setIsLoading(true);
+
+    const botMsgId = `bot-${Date.now()}`;
+    let accumulatedText = "";
+    let finalCartAction: any = null;
+    let finalFinishAction: any = null;
+
+    try {
+      const response = await fetch("/api/gemini/waiter", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [...messagesRef.current, userMsg].map(m => ({ role: m.role, content: m.content })),
+          advanced: useAdvanced,
+          tableNumber
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error("API call failed");
+      }
+
+      // Read response stream as NDJSON
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error("Failed to get response reader");
+      }
+
+      // Add placeholder bot message to the UI
+      setMessages(prev => [
+        ...prev,
+        {
+          id: botMsgId,
+          role: "assistant",
+          content: ""
+        }
+      ]);
+
+      // Set playing state
+      setPlayingMsgId(botMsgId);
+
+      const decoder = new TextDecoder();
+      let streamBuffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        streamBuffer += decoder.decode(value, { stream: true });
+        const lines = streamBuffer.split("\n");
+        streamBuffer = lines.pop() || ""; // Keep any partial line
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const data = JSON.parse(line);
+            
+            if (data.text) {
+              if (!loggedFirstToken) {
+                loggedFirstToken = true;
+                console.log(`[PERF LATENCY] Speech -> First Gemini Token: ${(performance.now() - perfStartTime).toFixed(0)}ms`);
+              }
+              setIsLoading(false);
+              accumulatedText += data.text;
+              
+              // 1. Update text message content in chat UI in real time
+              setMessages(prev => 
+                prev.map(msg => 
+                  msg.id === botMsgId ? { ...msg, content: accumulatedText } : msg
+                )
+              );
+              setLiveTranscript(accumulatedText);
+
+              // 2. Feed text to segmenter so AI starts speaking immediately!
+              processStreamedTextForSpeech(accumulatedText, false);
+            }
+
+            if (data.cartAction) {
+              finalCartAction = data.cartAction;
+            }
+            if (data.finishAction) {
+              finalFinishAction = data.finishAction;
+            }
+          } catch (e) {
+            console.warn("Error parsing chunk:", e);
+          }
+        }
+      }
+
+      // Signal stream completion to flush any remaining text
+      isTtsStreamDoneRef.current = true;
+      processStreamedTextForSpeech(accumulatedText, true);
+
+      // Auto-detect bot response language to align quick prompts
+      const botArabic = /[\u0600-\u06FF]/.test(accumulatedText);
+      if (botArabic) {
+        setDetectedLanguage("ar");
+      }
+
+      // Automatically add items to the cart in real time if recommended/triggered by model
+      if (finalCartAction) {
+        const { action, items } = finalCartAction;
+        if (action === "add" && Array.isArray(items)) {
+          const addedCartItems: CartItem[] = [];
+          items.forEach(item => {
+            const menuItem = MENU_ITEMS.find(m => m.id === item.itemId);
+            const image = menuItem ? menuItem.image : "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&q=80&w=600";
+            const basePrice = menuItem ? menuItem.price : (item.price || 4.5);
+            const customizationsArray = item.customizations && Array.isArray(item.customizations)
+              ? [{ title: "Customization", selected: item.customizations }]
+              : [];
+            
+            const cartItem: CartItem = {
+              id: `cart-${item.itemId}-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+              itemId: item.itemId,
+              name: menuItem ? menuItem.name : item.name,
+              image,
+              basePrice,
+              price: basePrice,
+              quantity: item.quantity || 1,
+              customizations: customizationsArray
+            };
+            
+            addedCartItems.push(cartItem);
+            
+            if (onAddToCart) {
+              onAddToCart(cartItem);
+            }
+          });
+          if (addedCartItems.length > 0) {
+            triggerEphemeralSummary(addedCartItems);
+          }
+        }
+      }
+
+      // Automatically open order summary receipt if triggered by model indicating done/receipt request
+      if (finalFinishAction && finalFinishAction.action === "finish") {
+        console.log("Finish order triggered by AI Waiter.");
+        // Give a tiny delay for speech queue to proceed smoothly
+        setTimeout(() => {
+          handleFinishConversation();
+        }, 800);
+      }
+
+    } catch (error) {
+      console.error("Chat error:", error);
+      isTtsStreamDoneRef.current = true;
+      const isAr = detectedLanguage === "ar";
+      const errMsgId = `err-${Date.now()}`;
+      const errMsg = isAr 
+        ? "عذراً، فقدت الاتصال بنظام المطبخ. يرجى إعادة المحاولة."
+        : "I apologize, I lost connection to the kitchen system. Please try asking again.";
+
+      // If we failed and didn't output anything, replace the empty loader or add error message
+      setMessages(prev => {
+        const filtered = prev.filter(msg => msg.id !== botMsgId);
+        return [
+          ...filtered,
+          {
+            id: errMsgId,
+            role: "assistant",
+            content: errMsg
+          }
+        ];
+      });
+
+      playSpeech(errMsgId, errMsg);
+    } finally {
+      setIsLoading(false);
+      if (isVoiceSessionActiveRef.current && ttsChunksRef.current.length === 0) {
+        setTimeout(() => {
+          restartSpeechRecognition();
+        }, 400);
+      }
+    }
+  };
+
+  const addOrUpdateLiveMessage = (role: "user" | "assistant", text: string) => {
+    setMessages(prev => {
+      const lastMsg = prev[prev.length - 1];
+      if (lastMsg && lastMsg.id.startsWith(`live-${role}`)) {
+        const updated = [...prev];
+        updated[updated.length - 1] = {
+          ...lastMsg,
+          content: lastMsg.content.endsWith(text) ? lastMsg.content : `${lastMsg.content} ${text}`.trim()
+        };
+        return updated;
+      } else {
+        return [
+          ...prev,
+          {
+            id: `live-${role}-${Date.now()}`,
+            role,
+            content: text
+          }
+        ];
+      }
+    });
+  };
+
+  // --- REAL-TIME LIVE VOICE SYSTEM (gemini-2.0-flash) ---
+
+  const startLiveSession = async () => {
+    console.log("[Audio Lifecycle] Starting Live Session...");
+    // Synchronously create/resume context to bypass Safari autoplay policy
+
+    if (audioCtxRef.current && audioCtxRef.current.state === "suspended") {
+      console.log(`[Audio Lifecycle] startLiveSession: Live API Context is '${audioCtxRef.current.state}'. Attempting to resume...`);
+      audioCtxRef.current.resume().then(() => {
+        console.log(`[Audio Lifecycle] startLiveSession: Live API Context successfully transitioned to '${audioCtxRef.current?.state}'.`);
+      }).catch(err => console.warn(`[Audio Lifecycle] startLiveSession: Failed to resume Live API Context: ${err}`));
+    } else {
+      console.log(`[Audio Lifecycle] startLiveSession: Live API Context already '${audioCtxRef.current.state}'.`);
+    }
+
+    try {
+      setLiveStatus("Acquiring microphone...");
+      setLiveTranscript(""); // Reset live transcript
+      stopAllAudio();
+
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            sampleRate: 16000,
+            channelCount: 1,
+            echoCancellation: true,
+            autoGainControl: true,
+            noiseSuppression: true
+          }
+        });
+        setMicPermissionState("granted");
+        setMicError(null);
+      } catch (micErr: any) {
+        console.warn("Real microphone access failed, falling back to simulated microphone stream:", micErr);
+        
+        let friendlyErr = "";
+        if (micErr.name === "NotAllowedError" || micErr.name === "PermissionDeniedError") {
+          setMicPermissionState("denied");
+          friendlyErr = detectedLanguage === "ar"
+            ? "تم حظر صلاحية الميكروفون. يرجى تفعيلها من إعدادات المتصفح للتحدث مع النادل الذكي."
+            : "Microphone access was denied. Please enable it in browser settings to speak to the AI.";
+        } else if (micErr.name === "NotReadableError" || micErr.name === "TrackStartError") {
+          friendlyErr = detectedLanguage === "ar"
+            ? "الميكروفون قيد الاستخدام حالياً أو مشغول بواسطة تطبيق آخر."
+            : "Microphone is busy or blocked by another application.";
+        } else if (micErr.name === "NotFoundError" || micErr.name === "DevicesNotFoundError") {
+          friendlyErr = detectedLanguage === "ar"
+            ? "لم يتم العثور على ميكروفون متصل بجهازك."
+            : "No microphone found on your device.";
+        } else {
+          friendlyErr = detectedLanguage === "ar"
+            ? `فشل الوصول للميكروفون: ${micErr.message || micErr.name}`
+            : `Microphone error: ${micErr.message || micErr.name}`;
+        }
+        setMicError(friendlyErr);
+        
+        // Create a simulated silent audio stream using Web Audio API to prevent app crash and allow session to run smoothly
+        const fallbackAudioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+        const destination = fallbackAudioCtx.createMediaStreamDestination();
+        
+        // Create a nearly silent oscillator to keep the stream tracks active and valid
+        const osc = fallbackAudioCtx.createOscillator();
+        osc.frequency.value = 440;
+        const gain = fallbackAudioCtx.createGain();
+        gain.gain.value = 0.0001; // almost complete silence
+        osc.connect(gain);
+        gain.connect(destination);
+        osc.start();
+        
+        stream = destination.stream;
+        setMicPermissionState("prompt");
+      }
+      liveMicStreamRef.current = stream;
+
+      // Determine websocket protocol
+      const isHttps = window.location.protocol === "https:";
+      const wsProtocol = isHttps ? "wss:" : "ws:";
+      const wsUrl = `${wsProtocol}//${window.location.host}/api/live?table=${tableNumber || "12"}&voice=${selectedVoice}`;
+
+      setLiveStatus("Connecting to live waiter...");
+      const ws = new WebSocket(wsUrl);
+      liveWsRef.current = ws;
+
+      const liveAudioCtx = audioCtxRef.current!;
+      liveNextPlayTimeRef.current = liveAudioCtx.currentTime;
+
+      ws.onopen = () => {
+        setIsLiveActive(true);
+        setLiveStatus(detectedLanguage === "ar" ? "تكلم الآن... النادل يستمع!" : "Listening... Start talking!");
+
+        const source = liveAudioCtx.createMediaStreamSource(stream);
+        const processor = liveAudioCtx.createScriptProcessor(2048, 1, 1);
+        liveProcessorRef.current = processor;
+
+        source.connect(processor);
+        processor.connect(liveAudioCtx.destination);
+
+        processor.onaudioprocess = (e) => {
+          const inputData = e.inputBuffer.getChannelData(0);
+          const pcmBuffer = new Int16Array(inputData.length);
+          for (let i = 0; i < inputData.length; i++) {
+            pcmBuffer[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
+          }
+
+          const bytes = new Uint8Array(pcmBuffer.buffer);
+          let binary = "";
+          for (let i = 0; i < bytes.byteLength; i++) {
+            binary += String.fromCharCode(bytes[i]);
+          }
+          const base64 = btoa(binary);
+
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ audio: base64 }));
+          }
+        };
+      };
+
+      ws.onmessage = async (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.audio) {
+            playLivePCMChunk(data.audio);
+          }
+          if (data.interrupted) {
+            setLiveStatus(detectedLanguage === "ar" ? "عفواً، قاطعتني... أنا أستمع إليك" : "Interrupted... listening to you");
+            if (audioCtxRef.current) {
+               liveNextPlayTimeRef.current = audioCtxRef.current.currentTime;
+            }
+            audioSourcesRef.current.forEach(source => {
+              try { source.stop(); } catch (e) {}
+            });
+            audioSourcesRef.current = [];
+          }
+          if (data.userText) {
+            setLiveTranscript(data.userText);
+            addOrUpdateLiveMessage("user", data.userText);
+          }
+          if (data.modelText) {
+            setLiveTranscript(data.modelText);
+            addOrUpdateLiveMessage("assistant", data.modelText);
+          }
+          
+          // Automatically add items to the cart in real time if triggered by live voice session tools
+          if (data.cartAction) {
+            const { action, items } = data.cartAction;
+            if (action === "add" && Array.isArray(items)) {
+              const addedCartItems: CartItem[] = [];
+              items.forEach(item => {
+                const menuItem = MENU_ITEMS.find(m => m.id === item.itemId);
+                const image = menuItem ? menuItem.image : "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&q=80&w=600";
+                const basePrice = menuItem ? menuItem.price : (item.price || 4.5);
+                const customizationsArray = item.customizations && Array.isArray(item.customizations)
+                  ? [{ title: "Customization", selected: item.customizations }]
+                  : [];
+                
+                const cartItem: CartItem = {
+                  id: `cart-${item.itemId}-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+                  itemId: item.itemId,
+                  name: menuItem ? menuItem.name : item.name,
+                  image,
+                  basePrice,
+                  price: basePrice,
+                  quantity: item.quantity || 1,
+                  customizations: customizationsArray
+                };
+
+                addedCartItems.push(cartItem);
+
+                if (onAddToCart) {
+                  onAddToCart(cartItem);
+                }
+              });
+              
+              if (addedCartItems.length > 0) {
+                triggerEphemeralSummary(addedCartItems);
+              }
+            }
+          }
+        } catch (e) {
+          console.error("Live audio processing error:", e);
+        }
+      };
+
+      ws.onerror = (err) => {
+        console.error("Live WebSocket error:", err);
+        const isAr = detectedLanguage === "ar";
+        const errMsg = isAr 
+          ? "عذراً، فشل الاتصال الصوتي المباشر بالنادل. يرجى استخدام الدردشة النصية أو التأكد من استقرار شبكتك."
+          : "Sorry, the live voice connection with the AI waiter failed. Please continue using text chat or verify your network stability.";
+        
+        setMessages(prev => [
+          ...prev,
+          {
+            id: `err-voice-${Date.now()}`,
+            role: "assistant",
+            content: errMsg
+          }
+        ]);
+        stopLiveSession();
+      };
+
+      ws.onclose = () => {
+        stopLiveSession();
+      };
+
+    } catch (err: any) {
+      console.error("Failed to start Live session:", err);
+      setMicPermissionState("denied");
+      const isAr = detectedLanguage === "ar";
+      const errMsg = isAr
+        ? `عذراً، لم نتمكن من تشغيل الميكروفون للاتصال المباشر (${err.message || "مرفوض"}). يرجى التأكد من تفعيل صلاحية الميكروفون من إعدادات المتصفح.`
+        : `Sorry, we couldn't access your microphone for the live call (${err.message || "Denied"}). Please ensure microphone permissions are granted in your browser settings.`;
+
+      setMessages(prev => [
+        ...prev,
+        {
+          id: `err-mic-${Date.now()}`,
+          role: "assistant",
+          content: errMsg
+        }
+      ]);
+      stopLiveSession();
+    }
+  };
+
+  const playLivePCMChunk = (base64Data: string) => {
+    const liveAudioCtx = audioCtxRef.current;
+    if (!liveAudioCtx) return;
+
+    // Track speaking state
+    if (liveSpeakingTimeoutRef.current) {
+      clearTimeout(liveSpeakingTimeoutRef.current);
+    }
+    setIsLiveSpeaking(true);
+
+    const binary = atob(base64Data);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+
+    const int16 = new Int16Array(bytes.buffer);
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) {
+      float32[i] = int16[i] / 32768.0;
+    }
+
+    const audioBuffer = liveAudioCtx.createBuffer(1, float32.length, 24000);
+    audioBuffer.getChannelData(0).set(float32);
+
+    const source = liveAudioCtx.createBufferSource();
+    source.buffer = audioBuffer;
+    if (analyserRef.current) {
+      source.connect(analyserRef.current);
+    } else {
+      source.connect(liveAudioCtx.destination);
+    }
+
+    const startTime = Math.max(liveAudioCtx.currentTime, liveNextPlayTimeRef.current);
+    source.start(startTime);
+    audioSourcesRef.current.push(source);
+    startVisualizer();
+    
+    // Cleanup source when done to avoid memory leaks
+    source.onended = () => {
+       const idx = audioSourcesRef.current.indexOf(source);
+       if (idx > -1) {
+         audioSourcesRef.current.splice(idx, 1);
+       }
+       if (audioSourcesRef.current.length === 0) {
+         stopVisualizer();
+       }
+    };
+    
+    liveNextPlayTimeRef.current = startTime + audioBuffer.duration;
+
+    // Clear speaking state after current chunk's duration completes
+    const durationMs = (startTime - liveAudioCtx.currentTime + audioBuffer.duration) * 1000;
+    liveSpeakingTimeoutRef.current = setTimeout(() => {
+      setIsLiveSpeaking(false);
+    }, durationMs);
+  };
+
+  const stopLiveSession = () => {
+    setIsLiveActive(false);
+    setLiveStatus("");
+    setIsLiveSpeaking(false);
+    if (liveSpeakingTimeoutRef.current) {
+      clearTimeout(liveSpeakingTimeoutRef.current);
+      liveSpeakingTimeoutRef.current = null;
+    }
+
+    if (liveProcessorRef.current) {
+      try { liveProcessorRef.current.disconnect(); } catch (e) {}
+      liveProcessorRef.current = null;
+    }
+    if (liveMicStreamRef.current) {
+      liveMicStreamRef.current.getTracks().forEach(track => track.stop());
+      liveMicStreamRef.current = null;
+    }
+    if (liveWsRef.current) {
+      liveWsRef.current.close();
+      liveWsRef.current = null;
+    }
+
+  };
+
+  const handleFinishConversation = async () => {
+    // 1. Stop all audio and live sessions
+    stopAllAudio();
+    stopLiveSession();
+    stopDictationStream();
+    if (isDictating && recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch (e) {}
+    }
+    setIsDictating(false);
+
+    // 2. Set state to summarizing
+    setIsSummarizing(true);
+    setSummaryError("");
+    setSummaryData(null);
+
+    // 3. Send message history to our summarize-order API endpoint
+    try {
+      const response = await fetch("/api/gemini/summarize-order", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages })
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to compile order details. Please try again.");
+      }
+
+      const data = await response.json();
+      setSummaryData(data);
+
+      if (data && data.items && data.items.length > 0) {
+        const isAr = detectedLanguage === "ar";
+        let readAloudText = "";
+
+        if (isAr) {
+          const itemsTextAr = data.items.map((item: any) => {
+            const customizationsText = item.customizations && item.customizations.length > 0
+              ? ` مع ${item.customizations.join(" و ")}`
+              : "";
+            return `${item.quantity} ${item.name}${customizationsText}`;
+          }).join("، و ");
+          const totalAr = data.items.reduce((acc: number, curr: any) => acc + (curr.price * curr.quantity), 0).toFixed(2);
+          readAloudText = `تفاصيل طلبك هي: ${itemsTextAr}. المجموع المقدر هو ${totalAr} دينار أردني. هل ترغب في تأكيد وإرسال هذا الطلب؟`;
+        } else {
+          const itemsTextEn = data.items.map((item: any) => {
+            const customizationsText = item.customizations && item.customizations.length > 0
+              ? ` with ${item.customizations.join(" and ")}`
+              : "";
+            return `${item.quantity} ${item.name}${customizationsText}`;
+          }).join(", and ");
+          const totalEn = data.items.reduce((acc: number, curr: any) => acc + (curr.price * curr.quantity), 0).toFixed(2);
+          readAloudText = `Your order details are: ${itemsTextEn}. The total estimated is ${totalEn} Jordanian Dinars. Would you like to confirm and place this order?`;
+        }
+
+        const botSummarySpeakId = `bot-summary-${Date.now()}`;
+        playSpeech(botSummarySpeakId, readAloudText);
+      }
+    } catch (err: any) {
+      console.error("Extraction error:", err);
+      setSummaryError(err.message || "Failed to parse conversation.");
+    } finally {
+      setIsSummarizing(false);
+    }
+  };
+
+  const submitVoiceOrder = async (orderSummary: typeof summaryData) => {
+    if (!orderSummary || !orderSummary.items || orderSummary.items.length === 0) return;
+    setIsSubmittingOrder(true);
+    setSubmissionError("");
+
+    try {
+      const orderId = `ord_${Date.now()}`;
+      const orderItems = orderSummary.items.map(item => ({
+        itemId: item.itemId,
+        name: item.name,
+        quantity: item.quantity,
+        price: item.price,
+        customizations: item.customizations && Array.isArray(item.customizations)
+          ? [{ title: "Customization", selected: item.customizations }]
+          : []
+      }));
+
+      const subtotal = orderSummary.items.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+      const taxRate = 16;
+      const tax = Number((subtotal * (taxRate / 100)).toFixed(2));
+      const serviceFee = 0;
+      const discountAmount = 0;
+      const talkTableFee = 0.05;
+      const total = Number(((subtotal * (1 + taxRate / 100)) + 0.05).toFixed(2));
+      const pointsEarned = Math.floor(total) * 10;
+
+      const userId = auth.currentUser?.uid || "guest_user";
+
+      const newOrder: Order = {
+        orderId,
+        userId,
+        tableNumber,
+        items: orderItems,
+        subtotal,
+        tax,
+        serviceFee,
+        discount: discountAmount,
+        talkTableFee,
+        total,
+        status: "pending",
+        orderStatus: "pending",
+        paymentStatus: "pending",
+        paymentMethod: "cash",
+        pointsEarned,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      };
+
+      // 1. Call server-side validation & logging endpoint
+      let finalOrder = { ...newOrder };
+      try {
+        const serverResponse = await fetch("/api/orders/validate-and-log", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ ...newOrder, taxRate })
+        });
+
+        if (!serverResponse.ok) {
+          const errData = await serverResponse.json();
+          const errors = errData.errors || ["Unknown validation error on the server."];
+          throw new Error(errors.join("; "));
+        }
+
+        const resData = await serverResponse.json();
+        if (resData.success && resData.order) {
+          finalOrder = resData.order;
+        }
+      } catch (err: any) {
+        console.error("Voice order server validation failed:", err);
+        throw err;
+      }
+
+      // 2. Write order to Firestore
+      await setDoc(doc(db, "orders", orderId), {
+        ...finalOrder,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+
+      console.log("=== VOICE ORDER PLACED SUCCESSFULLY ===");
+
+      if (onOrderPlaced) {
+        onOrderPlaced(finalOrder);
+      }
+      if (onClearCart) {
+        onClearCart();
+      }
+
+      // Clear summary data
+      setSummaryData(null);
+
+      // Speak and show success message
+      const successMsgEn = "Your order has been successfully placed and sent to the kitchen. It will be prepared shortly.";
+      const successMsgAr = "تم استلام طلبك بنجاح، وتم إرساله إلى المطبخ. سيتم تحضيره في أقرب وقت.";
+      
+      const isAr = detectedLanguage === "ar";
+      const displayMsg = isAr ? successMsgAr : successMsgEn;
+
+      const successBotMsgId = `bot-success-${Date.now()}`;
+      setMessages(prev => [
+        ...prev,
+        {
+          id: successBotMsgId,
+          role: "assistant",
+          content: displayMsg
+        }
+      ]);
+
+      playSpeech(successBotMsgId, displayMsg);
+
+      // Navigate to Tracker/Cart
+      if (onNavigate) {
+        onNavigate("cart");
+      }
+
+    } catch (err: any) {
+      console.error("=== VOICE ORDER SUBMISSION FAILED ===", err);
+      
+      const isAr = detectedLanguage === "ar";
+      const errorMsgText = isAr
+        ? "أعتذر منك، لم أتمكن من الاتصال بالمطبخ. اسمح لي أن أحاول إرسال طلبك مرة أخرى."
+        : "I'm sorry, I couldn't reach the kitchen. Let me try placing your order again.";
+      
+      setSubmissionError(errorMsgText);
+
+      const errBotMsgId = `bot-error-${Date.now()}`;
+      setMessages(prev => [
+        ...prev,
+        {
+          id: errBotMsgId,
+          role: "assistant",
+          content: errorMsgText
+        }
+      ]);
+
+      playSpeech(errBotMsgId, errorMsgText);
+    } finally {
+      setIsSubmittingOrder(false);
+    }
+  };
+
+  const handleConfirmOrder = () => {
+    if (!summaryData || !summaryData.items || summaryData.items.length === 0) return;
+    submitVoiceOrder(summaryData);
+  };
+
+  const handleCancelOrder = () => {
+    setSummaryData(null);
+    setMessages([
+      {
+        id: "welcome-msg",
+        role: "assistant",
+        content: `Hello! I'm your TalkTablee AI Waiter. I speak English and Arabic (فصحى & اللهجة الأردنية) fluently.
+      
+مرحباً بك! أنا النادل الذكي الخاص بك. أتحدث العربية والانجليزية بطلاقة ومستعد لمساعدتك.
+
+I am always listening to your voice and ready to help. Just speak your order, request pairings, or ask about ingredients. I will compile your final order when you indicate you're finished!
+أنا أستمع إليك دائماً وجاهز للمساعدة. فقط تحدث لطلب الوجبات، الاستفسار عن المكونات، أو طلب التوصيات. سأقوم بتلخيص وتأكيد طلبك عندما تنتهي!`
+      }
+    ]);
+    setLiveTranscript("");
+    
+    // Auto restart listening when they click to speak again
+    if (isVoiceSessionActiveRef.current) {
+      setTimeout(() => {
+        startSpeechRecognition();
+      }, 500);
+    }
+  };
+
+  const currentSuggestedPrompts = detectedLanguage === "ar" ? SUGGESTED_PROMPTS_AR : SUGGESTED_PROMPTS_EN;
+
+  // Derive active AI Orb State dynamically based on real-time application states
+  let orbState: OrbState = "idle";
+  if (isVoiceSessionActive) {
+    if (isLoading) {
+      orbState = "thinking";
+    } else if (isAiTalkingVisualizer || playingMsgId !== null) {
+      orbState = "speaking";
+    } else {
+      orbState = "listening";
+    }
+  } else {
+    if (isLiveActive) {
+      orbState = isLiveSpeaking || isAiTalkingVisualizer ? "speaking" : "listening";
+    } else if (isDictating) {
+      orbState = "listening";
+    } else if (isLoading) {
+      orbState = "thinking";
+    } else if (isAiTalkingVisualizer || playingMsgId !== null) {
+      orbState = "speaking";
+    }
+  }
+
+  return (
+    <div className="flex flex-col h-[78vh] max-w-4xl mx-auto bg-[#0d0d0f]/85 backdrop-blur-2xl border border-white/10 rounded-[28px] overflow-hidden shadow-2xl text-white relative">
+      {/* Immersive Header */}
+      <div className="p-4 bg-[#0d0d0f]/40 backdrop-blur-md border-b border-white/5 flex items-center justify-between z-20">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-full bg-[#C9A050] flex items-center justify-center text-black relative">
+            <ChefHat className="w-5 h-5 text-black" />
+            <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-green-500 rounded-full border-2 border-[#0d0d0f]" />
+          </div>
+          <div>
+            <div className="flex items-center gap-1.5">
+              <h3 className="font-display font-semibold text-sm text-white">
+                {detectedLanguage === "ar" ? "النادل الذكي لـ TalkTablee" : "TalkTablee AI Waiter"}
+              </h3>
+              <div className="inline-flex items-center gap-1 bg-[#C9A050]/10 text-[#C9A050] text-[9px] uppercase tracking-wider px-2 py-0.5 rounded-full font-mono font-semibold border border-[#C9A050]/20">
+                <Sparkles className="w-2.5 h-2.5" /> {detectedLanguage === "ar" ? `طاولة ${tableNumber}` : `Table ${tableNumber}`}
+              </div>
+            </div>
+            <p className="text-[10px] text-[#888888]">
+              {detectedLanguage === "ar" 
+                ? "تحدث مباشرة مع مساعدك الصوتي واطلب ما تشاء" 
+                : "Speak directly to your personal fine-dining assistant"}
+            </p>
+          </div>
+        </div>
+
+        {/* Action Controls */}
+        <div className="flex items-center gap-2 sm:gap-3">
+          {/* Audio Mute/Unmute Toggle Button */}
+          <button
+            id="ai-voice-mute-toggle"
+            onClick={() => {
+              unlockAudioPlayback();
+              setIsAudioMuted(!isAudioMuted);
+            }}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border text-xs font-medium transition-all cursor-pointer ${
+              isAudioMuted
+                ? "bg-rose-500/15 border-rose-500/30 text-rose-400 hover:bg-rose-500/25"
+                : "bg-emerald-500/15 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/25"
+            }`}
+            title={isAudioMuted ? "Audio Muted - Click to Unmute" : "Audio Active - Click to Mute"}
+          >
+            {isAudioMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5 animate-pulse" />}
+            <span className="font-mono text-[10px] font-bold uppercase hidden sm:inline">
+              {isAudioMuted
+                ? (detectedLanguage === "ar" ? "صامت" : "Muted")
+                : (detectedLanguage === "ar" ? "الصوت مفعل" : "Sound ON")}
+            </span>
+          </button>
+
+          {/* Test Voice Audio Output */}
+          <button
+            id="ai-voice-test-btn"
+            onClick={testVoice}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-[#C9A050]/20 hover:bg-[#C9A050]/30 border border-[#C9A050]/40 text-[#C9A050] text-xs font-semibold transition-all cursor-pointer active:scale-95"
+            title="Test Ward AI Voice Output"
+          >
+            <Volume2 className="w-3.5 h-3.5" />
+            <span className="text-[10px] font-bold font-mono uppercase hidden sm:inline">
+              {detectedLanguage === "ar" ? "تجربة الصوت" : "Test Voice"}
+            </span>
+          </button>
+
+          <button
+            onClick={() => setDetectedLanguage(prev => prev === "en" ? "ar" : "en")}
+            className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs text-[#C9A050] transition-colors cursor-pointer"
+            title="Switch languages"
+          >
+            <Languages className="w-3.5 h-3.5" />
+            <span className="font-mono text-[10px] font-bold uppercase">{detectedLanguage === "ar" ? "English" : "عربي"}</span>
+          </button>
+
+          <label className="flex items-center gap-2 cursor-pointer select-none">
+            <div className="text-right">
+              <span className="text-[10px] font-bold block uppercase font-mono tracking-tight text-white/40">
+                {detectedLanguage === "ar" ? "التفكير الفائق" : "Reasoning"}
+              </span>
+            </div>
+            <div className="relative">
+              <input
+                id="advanced-thinking-toggle"
+                type="checkbox"
+                checked={useAdvanced}
+                onChange={() => setUseAdvanced(!useAdvanced)}
+                className="sr-only"
+              />
+              <div className={`w-9 h-5 rounded-full transition-colors duration-300 ${useAdvanced ? "bg-[#C9A050]" : "bg-white/10"}`}>
+                <div className={`w-3.5 h-3.5 rounded-full bg-white absolute top-0.75 transition-all duration-300 ${useAdvanced ? "left-4.75" : "left-0.75"}`} />
+              </div>
+            </div>
+          </label>
+        </div>
+      </div>
+
+      {/* Main Container Area */}
+      <div className="flex-1 flex flex-col justify-center items-center p-6 relative overflow-y-auto">
+        {/* Decorative subtle top/bottom ambient lighting */}
+        <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-72 h-72 bg-[#C9A050]/5 rounded-full filter blur-[100px] pointer-events-none" />
+
+        <AnimatePresence mode="wait">
+          {summaryData ? (
+            /* --- RENDER BILL SUMMARY RECEIPT CARD --- */
+            <motion.div
+              key="summary-receipt"
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: -15 }}
+              className="w-full max-w-md bg-[#121214]/90 backdrop-blur-xl border border-white/10 rounded-2xl p-6 shadow-2xl relative overflow-hidden text-white"
+            >
+              {/* Receipt Header */}
+              <div className="text-center pb-4 border-b border-white/15">
+                <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-[#C9A050]/10 border border-[#C9A050]/20 text-[#C9A050] mb-2">
+                  <FileText className="w-6 h-6" />
+                </div>
+                <h4 className="font-display font-bold text-lg text-white tracking-tight uppercase">
+                  {detectedLanguage === "ar" ? "تفاصيل الطلب المستخلص" : "Order Extract Checklist"}
+                </h4>
+                <p className="text-[10px] font-mono text-[#C9A050] mt-0.5 tracking-wider">
+                  {detectedLanguage === "ar" ? `طاولة رقم ${tableNumber}` : `TABLE NUMBER ${tableNumber}`}
+                </p>
+              </div>
+
+              {/* Bilingual Message Summary */}
+              <div className="my-4 p-3.5 rounded-xl bg-white/5 border border-white/5 text-xs text-white/80 leading-relaxed text-center">
+                {detectedLanguage === "ar" ? summaryData.summaryTextAr : summaryData.summaryTextEn}
+              </div>
+
+              {/* Items Table */}
+              <div className="space-y-3 mt-4">
+                <div className="flex justify-between text-[10px] font-mono font-bold tracking-widest text-[#888888] uppercase pb-1.5 border-b border-white/5">
+                  <span>{detectedLanguage === "ar" ? "الوجبة" : "Item"}</span>
+                  <div className="flex gap-12">
+                    <span>{detectedLanguage === "ar" ? "العدد" : "Qty"}</span>
+                    <span>{detectedLanguage === "ar" ? "السعر" : "Price"}</span>
+                  </div>
+                </div>
+
+                {summaryData.items && summaryData.items.length > 0 ? (
+                  <div className="space-y-3 divide-y divide-white/5 max-h-[160px] overflow-y-auto pr-1">
+                    {summaryData.items.map((item, idx) => (
+                      <div key={idx} className="flex justify-between items-start pt-2.5 text-xs">
+                        <div className="flex-1 pr-4">
+                          <span className="font-semibold text-white block">{item.name}</span>
+                          {item.customizations && item.customizations.length > 0 && (
+                            <span className="text-[9px] text-[#C9A050] block mt-0.5">
+                              + {item.customizations.join(", ")}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex gap-14 text-right">
+                          <span className="text-white/60 font-mono">x{item.quantity}</span>
+                          <span className="font-semibold text-white font-mono">{(item.price * item.quantity).toFixed(2)} JD</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-center py-6 text-xs text-white/40">
+                    {detectedLanguage === "ar" ? "لم يتم تحديد أي وجبات للطلب بعد." : "No items were detected in your conversation."}
+                  </div>
+                )}
+
+                {/* Total Price display */}
+                {summaryData.items && summaryData.items.length > 0 && (
+                  <div className="pt-4 border-t border-dashed border-white/15 flex justify-between items-center text-sm">
+                    <span className="font-bold text-[#C9A050] tracking-wide uppercase">
+                      {detectedLanguage === "ar" ? "المجموع المقدر" : "Total Estimated"}
+                    </span>
+                    <span className="text-lg font-bold font-mono text-white">
+                      {summaryData.items.reduce((acc, curr) => acc + (curr.price * curr.quantity), 0).toFixed(2)} JD
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* Action Buttons */}
+              <div className="grid grid-cols-2 gap-3 mt-6 pt-4 border-t border-white/5">
+                <button
+                  onClick={handleCancelOrder}
+                  className="flex items-center justify-center gap-1.5 py-3 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 text-white/80 font-semibold text-xs transition-all active:scale-95 cursor-pointer"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                  {detectedLanguage === "ar" ? "إعادة التحدث" : "Speak Again"}
+                </button>
+                <button
+                  onClick={handleConfirmOrder}
+                  disabled={isSubmittingOrder || !summaryData.items || summaryData.items.length === 0}
+                  className="flex items-center justify-center gap-1.5 py-3 rounded-xl bg-[#C9A050] hover:bg-[#a7823e] text-black font-bold text-xs transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  {isSubmittingOrder ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      {detectedLanguage === "ar" ? "جاري الإرسال..." : "Submitting..."}
+                    </>
+                  ) : (
+                    <>
+                      <Check className="w-4 h-4" />
+                      {detectedLanguage === "ar" ? "تأكيد الطلب" : "Confirm Order"}
+                    </>
+                  )}
+                </button>
+              </div>
+            </motion.div>
+          ) : isSummarizing ? (
+            /* --- RENDER LOADING STATE WHILE EXTRACTING --- */
+            <motion.div
+              key="summarizing-loader"
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="flex flex-col items-center justify-center text-center gap-6"
+            >
+              <AiOrb state="thinking" className="w-32 h-32" />
+              <div className="space-y-1.5 max-w-sm">
+                <h4 className="font-display font-semibold text-base text-white">
+                  {detectedLanguage === "ar" ? "جاري تحضير وتلخيص الطلب..." : "Analyzing conversation..."}
+                </h4>
+                <p className="text-xs text-white/55 leading-relaxed">
+                  {detectedLanguage === "ar" 
+                    ? "الذكاء الاصطناعي يستخلص الوجبات والتعديلات ويجهز فاتورتك لمراجعتها." 
+                    : "Extracting dishes, customizing options, and compiling your luxury check."}
+                </p>
+              </div>
+            </motion.div>
+          ) : (
+            /* --- RENDER MINIMALIST AI ORB MAIN VOICE INTERFACE --- */
+            <motion.div
+              key="orb-voice-interface"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="flex flex-col items-center justify-center flex-1 w-full max-w-md gap-8"
+            >
+              {/* Dynamic instruction or status label */}
+              <div className="text-center space-y-1 z-10">
+                <p className="text-[10px] font-mono tracking-widest text-[#C9A050] uppercase font-bold">
+                  {isVoiceSessionActive
+                    ? (detectedLanguage === "ar" ? "المحادثة الصوتية مستمرة دائماً" : "ALWAYS-LISTENING ACTIVE VOICE")
+                    : (detectedLanguage === "ar" ? "مساعدك الصوتي الشخصي" : "INTELLINGENT DINING CONCIERGE")
+                  }
+                </p>
+                <h4 className="text-base font-semibold font-display tracking-tight text-white/95">
+                  {isVoiceSessionActive
+                    ? (isAiTalkingVisualizer || playingMsgId !== null 
+                        ? (detectedLanguage === "ar" ? "النادل يتحدث الآن..." : "The AI Waiter is speaking...")
+                        : (detectedLanguage === "ar" ? "النادل يستمع إليك بذكاء... تحدث وسأجيبك" : "The AI Waiter is listening... Speak and I will answer")
+                      )
+                    : (detectedLanguage === "ar" ? "اضغط على الأورب للبدء بالتحدث المستمر" : "Tap the Orb to Start Always-Listening Chat")
+                  }
+                </h4>
+              </div>
+
+              {/* Ward Single Voice Assistant Badge */}
+              <div className="w-full bg-white/5 border border-white/10 rounded-2xl p-3.5 z-10 flex items-center justify-between max-w-sm shadow-xl backdrop-blur-md">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-full bg-[#C9A050] text-black flex items-center justify-center font-bold text-lg shadow-md shrink-0">
+                    🎙️
+                  </div>
+                  <div className="text-left">
+                    <div className="flex items-center gap-2">
+                      <span className="font-display font-semibold text-sm text-white">
+                        {detectedLanguage === "ar" ? "ورد | Ward" : "Ward | ورد"}
+                      </span>
+                      <span className="text-[9px] font-mono uppercase bg-[#C9A050]/15 text-[#C9A050] px-1.5 py-0.5 rounded border border-[#C9A050]/20 font-bold">
+                        {detectedLanguage === "ar" ? "الصوت الرئيسي" : "AI Voice"}
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-white/60">
+                      {detectedLanguage === "ar" ? "النادل الصوتي الذكي لسيلين كافيه" : "Dedicated AI Voice Waiter"}
+                    </p>
+                  </div>
+                </div>
+                <div className="text-right pl-2 border-l border-white/10">
+                  <span className="text-[9px] text-white/40 block font-mono uppercase">
+                    {detectedLanguage === "ar" ? "السرعة" : "Pace"}
+                  </span>
+                  <span className="text-[10px] text-[#C9A050] font-mono font-bold">
+                    1.15x
+                  </span>
+                </div>
+              </div>
+
+              {/* Central Glowing Clickable Interactive AI Orb */}
+              <div className="relative flex items-center justify-center">
+                {/* Outer dynamic breathing ring */}
+                <motion.div 
+                  className={`absolute -inset-8 rounded-full pointer-events-none filter blur-2xl opacity-20 transition-colors duration-500 ${
+                    isVoiceSessionActive ? "bg-[#C9A050]" : "bg-white/10"
+                  }`}
+                  animate={{
+                    scale: isVoiceSessionActive ? [1, 1.2, 1] : [1, 1.05, 1],
+                  }}
+                  transition={{
+                    duration: 3,
+                    repeat: Infinity,
+                    ease: "easeInOut"
+                  }}
+                />
+                
+                {/* The clickable custom-motion AI Orb */}
+                <AiOrb 
+                  state={orbState} 
+                  onClick={() => {
+                    if (isVoiceSessionActive) {
+                      // Turn off voice session completely
+                      setIsVoiceSessionActive(false);
+                      isVoiceSessionActiveRef.current = false;
+                      stopAllAudio();
+                      if (recognitionRef.current) {
+                        try { recognitionRef.current.stop(); } catch (e) {}
+                      }
+                      setIsDictating(false);
+                    } else {
+                      // Start always-listening voice session
+                      unlockAudioPlayback();
+                      setIsVoiceSessionActive(true);
+                      isVoiceSessionActiveRef.current = true;
+                      stopAllAudio();
+                      startSpeechRecognition();
+                    }
+                  }}
+                  className="scale-125 z-10 hover:scale-130 transition-transform duration-300 cursor-pointer"
+                />
+              </div>
+
+                            {/* REAL-TIME AUDIO VISUALIZER CANVAS */}
+              <div className="w-full flex justify-center h-12 my-2 z-10 pointer-events-none opacity-80">
+                <canvas 
+                  ref={canvasRef} 
+                  width={240} 
+                  height={48} 
+                  className={`transition-opacity duration-300 ${isAiTalkingVisualizer ? "opacity-100" : "opacity-0"}`}
+                />
+              </div>
+
+              {/* REAL-TIME STREAMED SUBTITLE WORDS BOX ("the words") */}
+              <div className="w-full z-10 flex flex-col items-center gap-2">
+                <AnimatePresence mode="popLayout">
+                  {liveTranscript ? (
+                    <motion.div
+                      key="active-transcript"
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -10 }}
+                      className="w-full bg-white/5 border border-white/5 rounded-2xl p-4 text-center max-w-sm shadow-md"
+                    >
+                      <p className="text-xs text-white/90 font-medium leading-relaxed italic">
+                        "{liveTranscript}"
+                      </p>
+                    </motion.div>
+                  ) : (
+                    <motion.p
+                      key="idle-desc"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 0.4 }}
+                      className="text-[11px] text-center text-white/60 max-w-xs leading-relaxed"
+                    >
+                      {detectedLanguage === "ar"
+                        ? "اطلب مثل: 'بدي واحد سبانش لاتيه وواحد تارت الفواكه لو سمحت'"
+                        : 'Say: "I would like to order one Spanish Latte and a Truffle Sourdough Toast"'}
+                    </motion.p>
+                  )}
+                </AnimatePresence>
+                
+                {/* Active live status subtitle */}
+                {isLiveActive && (
+                  <span className="text-[10px] font-mono text-[#C9A050] mt-1 tracking-wider animate-pulse font-semibold">
+                    ● {liveStatus}
+                  </span>
+                )}
+              </div>
+
+              {/* MIC PERMISSION ERROR IN-UI WARNING */}
+              {(micPermissionState === "denied" || micError) && (
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.95 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  className="p-3.5 bg-amber-500/10 border border-amber-500/25 rounded-2xl flex items-start gap-2.5 text-xs text-amber-200/90 leading-relaxed shadow-lg max-w-sm"
+                >
+                  <AlertCircle className="w-4.5 h-4.5 text-[#C9A050] shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-semibold text-white text-left">
+                      {detectedLanguage === "ar" ? "تنبيه بخصوص الميكروفون" : "Microphone Notice"}
+                    </p>
+                    <p className="text-[10px] opacity-85 mt-0.5 text-left leading-normal">
+                      {micError || (detectedLanguage === "ar"
+                        ? "يرجى تعديل الصلاحيات وسماح للميكروفون للتمكن من الاتصال والتحدث."
+                        : "Please modify browser site settings to allow Microphone access to interact with the AI.")}
+                    </p>
+                  </div>
+                </motion.div>
+              )}
+
+              {/* Quick Menu Dish Tray for Instant Voice Inquiries */}
+              <div className="w-full max-w-md z-10 border-t border-white/5 pt-3">
+                <p className="text-[10px] font-mono uppercase text-white/40 mb-2 font-bold text-center tracking-wider">
+                  {detectedLanguage === "ar" ? "اضغط على أي وجبة للاستفسار أو الطلب بصوتك" : "Tap any dish to inquire or order by voice"}
+                </p>
+                <div className="flex items-center gap-2 overflow-x-auto pb-1.5 scrollbar-none px-1">
+                  {MENU_ITEMS.slice(0, 12).map((item) => (
+                    <button
+                      key={item.id}
+                      onClick={() => handleSendMessage(`I want to order ${item.name}. Can you add it to my cart?`)}
+                      className="flex items-center gap-2 bg-white/5 hover:bg-[#C9A050]/20 border border-white/10 hover:border-[#C9A050]/40 rounded-xl p-1.5 shrink-0 transition-all cursor-pointer text-left group"
+                    >
+                      <img src={item.image} alt={item.name} className="w-7 h-7 rounded-lg object-cover shrink-0" />
+                      <div className="pr-1">
+                        <span className="text-[10px] font-medium text-white group-hover:text-[#C9A050] block truncate max-w-[100px]">
+                          {item.name}
+                        </span>
+                        <span className="text-[9px] font-mono text-[#C9A050] block">
+                          {item.price.toFixed(2)} JD
+                        </span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Action Trigger Buttons for completing conversation */}
+              <div className="flex gap-3 z-10">
+                {(isLiveActive || isDictating || messages.length > 1) && (
+                  <button
+                    onClick={handleFinishConversation}
+                    className="bg-[#C9A050]/15 hover:bg-[#C9A050]/25 text-[#C9A050] border border-[#C9A050]/30 text-xs px-6 py-2.5 rounded-full font-bold uppercase tracking-wider transition-all cursor-pointer shadow-lg active:scale-95 flex items-center gap-2"
+                  >
+                    <FileText className="w-4 h-4" />
+                    {detectedLanguage === "ar" ? "عرض الفاتورة والملخص" : "Finish & Get Receipt"}
+                  </button>
+                )}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Ephemeral Cart Summary Popup */}
+        <AnimatePresence>
+          {ephemeralSummary && (
+            <motion.div
+              initial={{ opacity: 0, y: -20, scale: 0.95 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -20, scale: 0.95 }}
+              className="absolute top-20 left-1/2 -translate-x-1/2 z-50 bg-[#1A1A1A] border border-[#C9A050]/30 shadow-2xl rounded-2xl p-4 w-[90%] max-w-sm pointer-events-none"
+            >
+              <div className="flex items-center gap-3 mb-3">
+                <div className="w-8 h-8 rounded-full bg-[#C9A050]/20 flex items-center justify-center text-[#C9A050]">
+                  <Check className="w-4 h-4" />
+                </div>
+                <div>
+                  <h4 className="font-bold text-white text-sm">
+                    {detectedLanguage === 'ar' ? 'تمت الإضافة بنجاح' : 'Added to Cart'}
+                  </h4>
+                  <p className="text-[10px] text-white/50 uppercase tracking-widest font-mono">
+                    {cart?.reduce((acc, c) => acc + c.quantity, 0)} {detectedLanguage === 'ar' ? 'عناصر' : 'Items'} 
+                    <span className="mx-1.5 opacity-50">·</span> 
+                    {cart?.reduce((acc, c) => acc + (c.price * c.quantity), 0).toFixed(2)} JD
+                  </p>
+                </div>
+              </div>
+              <div className="space-y-2 max-h-32 overflow-y-auto pr-1">
+                {ephemeralSummary.items.map((item, idx) => (
+                  <div key={idx} className="flex justify-between items-center bg-white/5 border border-white/5 rounded-lg p-2">
+                    <div className="flex flex-col">
+                      <span className="text-sm font-medium text-white line-clamp-1">{item.quantity > 1 ? `${item.quantity}x ` : ''}{item.name}</span>
+                      {item.customizations?.map((c, i) => (
+                        <span key={i} className="text-[10px] text-white/50 line-clamp-1">{c.selected.join(', ')}</span>
+                      ))}
+                    </div>
+                    <div className="text-sm font-bold text-[#C9A050] pl-3 shrink-0">
+                      {(item.price * item.quantity).toFixed(2)} JD
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+      </div>
+    </div>
+  );
+}

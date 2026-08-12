@@ -1,0 +1,6 @@
+{
+  "name": "Salein Cafe - Ward Voice AI Waiter",
+  "description": "Production-ready real-time Voice AI waiter (Ward | ورد) for Salein Cafe.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

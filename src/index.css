@@ -1,0 +1,135 @@
+@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;800&family=Tajawal:wght@400;500;700&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,400..700;1,400..700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Cairo", "Tajawal", "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-display: "Cairo", "Space Grotesk", sans-serif;
+  --font-serif: "Tajawal", "Playfair Display", Georgia, serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  
+  --color-brand-50: #050505;
+  --color-brand-100: #0d0d0f;
+  --color-brand-200: #1a1a1e;
+  --color-brand-500: #C9A050;
+  --color-brand-600: #a7823e;
+  --color-brand-primary: #C9A050; /* Royal gold */
+}
+
+/* Custom styles for luxurious ambient gradients and cross-browser resilience */
+:root {
+  --sat: env(safe-area-inset-top, 0px);
+  --sar: env(safe-area-inset-right, 0px);
+  --sab: env(safe-area-inset-bottom, 0px);
+  --sal: env(safe-area-inset-left, 0px);
+}
+
+html, body, #root {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: #050505;
+  color: #F5F5F7;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-tap-highlight-color: transparent;
+  text-rendering: optimizeLegibility;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+  overflow-x: hidden;
+  width: 100%;
+}
+
+[dir="rtl"] body {
+  font-family: 'Cairo', 'Tajawal', sans-serif;
+}
+
+/* Touch targets and mobile responsiveness */
+button, a, input, select, textarea {
+  touch-action: manipulation;
+  -webkit-appearance: none;
+}
+
+/* RTL and text wrapping rules to prevent Arabic clipping */
+p, h1, h2, h3, h4, h5, h6, span, button, a {
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+/* Smooth layout updates */
+* {
+  transition: direction 0.2s ease, text-align 0.2s ease;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Safari Glassmorphism / Backdrop Filter Fallback */
+.backdrop-blur-md, .backdrop-blur-xl, .backdrop-blur-sm, .backdrop-blur-2xl {
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+}
+
+/* Safe area padding and margin utilities */
+.safe-pb, .pb-safe {
+  padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+}
+
+.safe-pt, .pt-safe {
+  padding-top: calc(1rem + env(safe-area-inset-top, 0px));
+}
+
+.safe-pl, .pl-safe {
+  padding-left: env(safe-area-inset-left, 0px);
+}
+
+.safe-pr, .pr-safe {
+  padding-right: env(safe-area-inset-right, 0px);
+}
+
+.safe-px, .px-safe {
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+
+/* Elegant scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.glow-ambient {
+  box-shadow: 0 0 50px -10px rgba(201, 160, 80, 0.25);
+}
+
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .printable-receipt, .printable-receipt * {
+    visibility: visible;
+  }
+  .printable-receipt {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    max-width: 100% !important;
+    background: #000 !important;
+    color: #fff !important;
+    border: none !important;
+    box-shadow: none !important;
+  }
+}
